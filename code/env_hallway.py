@@ -222,30 +222,32 @@ class FormationHallwayEnv(gym.Env):
         }
 
     # --- reward components ----------------------------------------------
-    def _formation_reward(self, env_idx: int, ps: torch.Tensor) -> torch.Tensor:
+    def _formation_reward(self, env_idx: int, ps: torch.Tensor):
         """Per-robot formation penalty for env_idx.
 
         Hungarian-assigns active (non-teleop'd) robots to slots of the target
-        formation centred at the active-robot centroid. Returns a tensor of
-        shape (n_agents,) with 0 in slots that are teleop'd or not assigned.
+        formation centred at the active-robot centroid. Returns a tuple
+        (per_robot_penalty (n_agents,), mean_slot_distance or None).
         """
         n = self.cfg["n_agents"]
         out = torch.zeros(n, device=ps.device)
         active_idx = (self.teleop_mask[env_idx] < 0.5).nonzero(as_tuple=True)[0]
         k = active_idx.numel()
         if k < 2:
-            return out
+            return out, None
         active_ps = ps[active_idx]  # (k, 2)
         centroid = active_ps.mean(dim=0)
         slots = self.target_formation_positions(k).to(ps.device) + centroid  # (k, 2)
         cost = torch.cdist(active_ps, slots).cpu().numpy()
         row, col = linear_sum_assignment(cost)
-        # row[i] -> active robot in active_idx, col[i] -> slot
         coeff = self.cfg["reward_coeffs"]["k_form"]
+        dists = []
         for ri, ci in zip(row, col):
             robot = int(active_idx[ri].item())
-            out[robot] = -coeff * float(cost[ri, ci])
-        return out
+            d = float(cost[ri, ci])
+            dists.append(d)
+            out[robot] = -coeff * d
+        return out, sum(dists) / len(dists)
 
     def _stall_penalty(self, env_idx: int, centroid: torch.Tensor) -> float:
         h = self._centroid_history[env_idx]
@@ -307,8 +309,12 @@ class FormationHallwayEnv(gym.Env):
         rewards += coeffs["k_fwd"] * dy * active
 
         # Formation + stall + goal — per env
+        formation_errs: List[Optional[float]] = [None] * nE
+        stalled_flags = [False] * nE
         for e in range(nE):
-            rewards[e] += self._formation_reward(e, self.ps[e]) * active[e]
+            penalty, err = self._formation_reward(e, self.ps[e])
+            rewards[e] += penalty * active[e]
+            formation_errs[e] = err
 
             active_e = active[e].bool()
             if active_e.any():
@@ -316,6 +322,7 @@ class FormationHallwayEnv(gym.Env):
                 stall_pen = self._stall_penalty(e, centroid)
                 if stall_pen != 0.0:
                     rewards[e] += stall_pen * active[e]
+                    stalled_flags[e] = True
 
                 # Goal bonus: cluster centroid past GOAL_Y (one-shot)
                 if not bool(self.goal_reached[e]) and float(centroid[Y].item()) >= cfg["goal_y"]:
@@ -331,12 +338,22 @@ class FormationHallwayEnv(gym.Env):
         obs = [self.get_obs(i) for i in range(nE)]
         infos = []
         for e in range(nE):
+            active_e = active[e].bool()
+            mean_dy = (
+                float((dy[e][active_e]).mean().item()) / cfg["dt"] if active_e.any() else 0.0
+            )
+            wall_hit = bool((overshoot_x[e] > 0).any().item())
+            collided = bool((rewards[e] <= -coeffs["k_coll"] + 1e-6).any().item())
             infos.append(
                 {
                     "rewards": {k: float(rewards[e, k].item()) for k in range(n)},
                     "active_count": int(active[e].sum().item()),
                     "goal_reached": bool(self.goal_reached[e].item()),
-                    "centroid_y": float(self.ps[e][:, Y].mean().item()),
+                    "formation_error": formation_errs[e],
+                    "fwd_velocity": mean_dy,
+                    "stalled": stalled_flags[e],
+                    "wall_hit": wall_hit,
+                    "collided": collided,
                 }
             )
         return obs, torch.sum(rewards, dim=1).tolist(), dones, infos
