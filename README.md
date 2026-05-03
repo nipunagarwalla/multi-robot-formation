@@ -77,6 +77,7 @@ afor/
 │   ├── env_hallway.py            # NEW · dynamic-formation env
 │   ├── teleop.py                 # NEW · RandomTeleop + KeyboardTeleop
 │   ├── metrics.py                # NEW · RunLogger + EpisodeAccumulator
+│   ├── checkpoint.py             # NEW · save/load helpers, resume support
 │   ├── train_hallway.py          # NEW · PPO trainer with masked loss + metrics
 │   ├── eval_hallway.py           # NEW · headless / rendered eval -> eval.json
 │   ├── render_hallway.py         # NEW · pygame renderer with formation overlay
@@ -296,6 +297,7 @@ python code/train_hallway.py [flags]
 | `--checkpoint-every` | 20 | save checkpoint every N iters (last iter always saved) |
 | `--no-teleop` | off | disable `RandomTeleop` (debug only) |
 | `--seed` | 0 | seeds random / numpy / torch |
+| `--resume` | none | path to a `.pt` checkpoint to resume from (continues iteration numbering, restores Adam moments) |
 
 PPO hyperparameters (gamma 0.995, lambda 0.95, clip 0.2, lr 5e-5,
 4 SGD epochs, value-clip 1.0, max grad norm 0.5, entropy coeff 0.001)
@@ -311,6 +313,38 @@ are the source of truth for analysis — the print is just a convenience.
 **Loss masking.** The PPO objective multiplies per-robot pg, value, and
 entropy losses by `(1 - teleop_mask)` and renormalises by the sum of the
 mask, so gradients flow only through policy-controlled robots.
+
+### Resuming a run
+
+```
+python code/train_hallway.py --resume runs/<ts>_<tag>/weights/latest.pt --iterations 200 --tag hallway-v1-cont
+```
+
+`--iterations N` is **additional** iterations to run, not a target total.
+A resumed run:
+
+- Restores the agent state dict **and** the Adam optimizer state, so the
+  running moments do not reset (small but real impact on early stability).
+- Continues iteration numbering from the checkpoint. If you stopped at
+  `iter=500` and resume for `--iterations 200`, the new
+  `iterations.csv` is numbered `501..700` — concatenate the two CSVs to
+  get the full curve.
+- Lands in its own `runs/<new-ts>_<new-tag>/` directory; `config.json`
+  records the lineage in a `resume` block:
+  ```json
+  "resume": {
+    "from": "/abs/path/to/runs/.../weights/latest.pt",
+    "from_iteration": 500,
+    "had_optimizer_state": true
+  }
+  ```
+  `had_optimizer_state: false` means you resumed from a legacy
+  bare-state_dict checkpoint and Adam started fresh.
+
+Checkpoints are written as a dict `{agent, optimizer, iteration}` (see
+`code/checkpoint.py`). `eval_hallway.py` and `run_demo.py` route
+through the same `load_checkpoint` helper, which also accepts older
+bare-state_dict files for backward compatibility.
 
 ---
 
