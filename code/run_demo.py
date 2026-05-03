@@ -19,6 +19,7 @@ import torch
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from checkpoint import load_checkpoint
 from env_hallway import FormationHallwayEnv
 from model import Agent
 from render_hallway import HallwayRenderer
@@ -56,8 +57,8 @@ def main():
         {"num_envs": 1, "max_time_steps": args.max_steps, "device": "cpu"}
     )
     agent = _build_agent(env, device)
-    state_dict = torch.load(args.weights, map_location=device, weights_only=True)
-    agent.load_state_dict(state_dict)
+    ckpt = load_checkpoint(args.weights, device)
+    agent.load_state_dict(ckpt["agent"])
     agent.eval()
 
     renderer = HallwayRenderer()

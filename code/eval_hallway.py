@@ -22,6 +22,7 @@ import torch
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from checkpoint import load_checkpoint
 from contract import MAX_AGENTS
 from env_hallway import FormationHallwayEnv
 from metrics import EpisodeAccumulator
@@ -75,8 +76,8 @@ def main():
         }
     )
     agent = _build_agent(env, device)
-    state_dict = torch.load(args.weights, map_location=device, weights_only=True)
-    agent.load_state_dict(state_dict)
+    ckpt = load_checkpoint(args.weights, device)
+    agent.load_state_dict(ckpt["agent"])
     agent.eval()
 
     teleop = RandomTeleop(env, seed=args.seed) if args.teleop else None

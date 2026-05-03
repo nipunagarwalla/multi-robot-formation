@@ -26,6 +26,7 @@ from tqdm import tqdm
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from checkpoint import load_checkpoint, save_checkpoint
 from contract import REWARD_COEFFS
 from env_hallway import FormationHallwayEnv
 from metrics import EpisodeAccumulator, RunLogger
@@ -79,6 +80,9 @@ def main():
     ap.add_argument("--no-teleop", action="store_true",
                     help="disable random-teleop disturbance (debug only)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--resume", type=str, default=None,
+                    help="path to a .pt checkpoint to resume from "
+                         "(continues iteration numbering, restores optimizer state)")
     args = ap.parse_args()
 
     config = make_config(num_envs=args.num_envs, max_time_steps=args.max_steps)
@@ -93,6 +97,24 @@ def main():
     env = FormationHallwayEnv(config["env_config"])
     agent = Agent(env, config).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=config["lr"], eps=1e-5)
+
+    start_iteration = 0
+    resume_meta = None
+    if args.resume is not None:
+        ckpt = load_checkpoint(args.resume, device)
+        agent.load_state_dict(ckpt["agent"])
+        if ckpt["optimizer"] is not None:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        start_iteration = int(ckpt["iteration"])
+        resume_meta = {
+            "from": os.path.abspath(args.resume),
+            "from_iteration": start_iteration,
+            "had_optimizer_state": ckpt["optimizer"] is not None,
+        }
+        print(
+            f"[resume] from {resume_meta['from']} at iter={start_iteration}"
+            + ("" if resume_meta["had_optimizer_state"] else "  (NO optimizer state — Adam moments restart)")
+        )
 
     teleop = None if args.no_teleop else RandomTeleop(
         env,
@@ -114,6 +136,8 @@ def main():
             "teleop": config["teleop"] if teleop is not None else None,
             "reward_coeffs": REWARD_COEFFS,
             "args": vars(args),
+            "resume": resume_meta,
+            "start_iteration": start_iteration,
         }
     )
     print(f"[run] {logger.run_id} -> {logger.dir}")
@@ -140,7 +164,9 @@ def main():
     start_time = time.time()
     obs_per_step: list = []
 
-    for iteration in range(1, args.iterations + 1):
+    iter_lo = start_iteration + 1
+    iter_hi = start_iteration + args.iterations + 1
+    for iteration in range(iter_lo, iter_hi):
         obs_per_step = []
         ep_rewards: list = []
         ep_lengths: list = []
@@ -300,13 +326,13 @@ def main():
             f"kl {last_kl:+.4f}  ep_len {mean_ep_len:.1f}"
         )
 
-        if iteration % args.checkpoint_every == 0 or iteration == args.iterations:
+        if iteration % args.checkpoint_every == 0 or iteration == iter_hi - 1:
             ckpt = logger.checkpoint_path(iteration)
-            torch.save(agent.state_dict(), ckpt)
+            save_checkpoint(ckpt, agent, optimizer, iteration)
             logger.update_latest_symlink(ckpt)
 
     logger.close()
-    print(f"[done] last ckpt: {logger.checkpoint_path(args.iterations)}")
+    print(f"[done] last ckpt: {logger.checkpoint_path(iter_hi - 1)}")
 
 
 if __name__ == "__main__":
