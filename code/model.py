@@ -96,8 +96,8 @@ class Model(nn.Module):
         self.obs_space = obs_space
         self.action_space = action_space
 
-        self.n_agents = 5#obs_space["pos"].shape[0]
-        self.outputs_per_agent = 4#int(num_outputs / self.n_agents)
+        self.n_agents = obs_space["pos"].shape[0]
+        self.outputs_per_agent = 4
 
         activation = {
             "relu": nn.ReLU,
@@ -108,15 +108,25 @@ class Model(nn.Module):
 
         self.comm_range = torch.Tensor([cfg["comm_range"]])
 
-        self.gnn = GNNBranch(6, cfg["msg_features"], self.outputs_per_agent, activation)
-        self.gnn_value = GNNBranch(6, cfg["msg_features"], 1, activation)
+        # Per-robot input features: [goal-pos (2), pos (2), pos+vel (2)] = 6 base
+        # Optional appended bits: teleop_mask (1), present_mask (1) — gated by cfg
+        self.use_masks = bool(cfg.get("use_masks", False))
+        self.in_features = 8 if self.use_masks else 6
+
+        self.gnn = GNNBranch(self.in_features, cfg["msg_features"], self.outputs_per_agent, activation)
+        self.gnn_value = GNNBranch(self.in_features, cfg["msg_features"], 1, activation)
         self.use_beta = True
 
     def forward(self, input_dict, state, seq_lens):
         pos = input_dict["pos"]
         vel = input_dict["vel"]
         goal = input_dict["goal"]
-        x = torch.cat([goal - pos, pos, pos + vel], dim=-1)
+        feats = [goal - pos, pos, pos + vel]
+        if self.use_masks:
+            tm = input_dict["teleop_mask"].unsqueeze(-1)
+            pm = input_dict["present_mask"].unsqueeze(-1)
+            feats += [tm, pm]
+        x = torch.cat(feats, dim=-1)
         outputs = self.gnn(pos, x, self.comm_range)
         values = self.gnn_value(pos, x, self.comm_range)
         self._cur_value = values.view(-1, self.n_agents)
@@ -145,20 +155,23 @@ class Agent(nn.Module):
         self.model = model
 
     def format_input(self, x, device):
-        # format from dict to tensor input
+        # format from list-of-dict (per env) to batched tensor dict
         obs = x
 
         key_list = ['pos', 'vel', 'goal']
-        concat_list = {}
-        for key in key_list:
-            concat_list[key] = []
-            for obs_instance in obs:
-                concat_list[key].append(obs_instance[key])
+        # Include masks if present in the observation — model decides whether
+        # to use them based on its use_masks config.
+        if obs and 'teleop_mask' in obs[0]:
+            key_list = key_list + ['teleop_mask', 'present_mask']
 
+        concat_list = {key: [] for key in key_list}
+        for obs_instance in obs:
+            for key in key_list:
+                concat_list[key].append(obs_instance[key])
 
         input_dict = {}
         for key in key_list:
-            input_dict[key] = torch.tensor(concat_list[key]).to(device)
+            input_dict[key] = torch.tensor(concat_list[key], dtype=torch.float32).to(device)
         return input_dict
 
     def get_value(self, x):
