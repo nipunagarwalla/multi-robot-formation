@@ -5,3 +5,4 @@ __pycache__/
 runs/
 weights/
 .DS_Store
+.claude/settings.local.json
