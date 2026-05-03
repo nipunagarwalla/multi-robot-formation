@@ -1,2 +1,7 @@
 CLAUDE.md
 .venv
+__pycache__/
+*.pyc
+runs/
+weights/
+.DS_Store
