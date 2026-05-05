@@ -1,11 +1,15 @@
 """Headless or rendered evaluation of a trained FormationHallway policy.
 
 Writes <run-dir>/eval.json with per-episode reward, forward velocity,
-formation error per active count, and a success bool.
+formation error per active count, and a success bool. With --teleop, the
+new RandomTeleop default (multi-grab + initial regime) means episodes
+span all four active-count regimes; the JSON includes a per_regime
+breakdown bucketed by min_active_count of each episode.
 
 Usage:
   python code/eval_hallway.py --weights runs/<ts>/weights/latest.pt --episodes 20
   python code/eval_hallway.py --weights runs/<ts>/weights/latest.pt --render
+  python code/eval_hallway.py --weights runs/<ts>/weights/latest.pt --teleop
 """
 from __future__ import annotations
 
@@ -148,6 +152,24 @@ def main():
             if eps_done >= args.episodes:
                 break
 
+    # bucket episodes by min_active_count — that's the "hardest" regime each
+    # episode visited and the most informative single label for per-regime
+    # success rates
+    per_regime: dict = {}
+    for k in (1, 2, 3, 4):
+        bucket = [r for r in records if r.get("min_active_count") == k]
+        if not bucket:
+            per_regime[str(k)] = {"n_episodes": 0}
+            continue
+        per_regime[str(k)] = {
+            "n_episodes": len(bucket),
+            "success_rate": float(np.mean([r["reached_goal"] for r in bucket])),
+            "mean_total_reward": float(np.mean([r["total_reward"] for r in bucket])),
+            "mean_episode_length": float(np.mean([r["episode_length"] for r in bucket])),
+            "mean_forward_velocity": float(np.mean([r["forward_velocity_mean"] for r in bucket])),
+            "mean_formation_error": float(np.mean([r["formation_error_mean"] for r in bucket])),
+        }
+
     summary = {
         "weights": os.path.abspath(args.weights),
         "wall_time_s": round(time.time() - t0, 2),
@@ -157,6 +179,7 @@ def main():
         "mean_episode_length": float(np.mean([r["episode_length"] for r in records])) if records else 0.0,
         "mean_forward_velocity": float(np.mean([r["forward_velocity_mean"] for r in records])) if records else 0.0,
         "mean_formation_error": float(np.mean([r["formation_error_mean"] for r in records])) if records else 0.0,
+        "per_regime": per_regime,
         "records": records,
     }
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -170,6 +193,19 @@ def main():
         f"mean_v_y={summary['mean_forward_velocity']:+.3f}  "
         f"-> {out_path}"
     )
+    if any(per_regime[str(k)].get("n_episodes", 0) > 0 for k in (1, 2, 3, 4)):
+        print("       per-regime (bucketed by min_active_count):")
+        for k in (1, 2, 3, 4):
+            r = per_regime[str(k)]
+            if r.get("n_episodes", 0) == 0:
+                print(f"         active={k}: (none)")
+                continue
+            print(
+                f"         active={k}: n={r['n_episodes']:3d}  "
+                f"succ={r['success_rate']*100:5.1f}%  "
+                f"mean_v_y={r['mean_forward_velocity']:+.3f}  "
+                f"form_err={r['mean_formation_error']:.3f}"
+            )
     if renderer:
         renderer.close()
 
