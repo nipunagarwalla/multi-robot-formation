@@ -36,6 +36,16 @@ ITER_COLUMNS: List[str] = [
     "mean_reward",
     "mean_episode_length",
     "lr",
+    # success / regime breakdown — populated per iteration from finished episodes
+    "success_rate",
+    "formation_error_active_1",
+    "formation_error_active_2",
+    "formation_error_active_3",
+    "formation_error_active_4",
+    "n_episodes_active_1",
+    "n_episodes_active_2",
+    "n_episodes_active_3",
+    "n_episodes_active_4",
 ]
 
 
