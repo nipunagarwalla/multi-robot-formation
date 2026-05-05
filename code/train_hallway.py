@@ -9,6 +9,7 @@ Mirrors code/train.py but adapts for:
 Run:
   python code/train_hallway.py --iterations 200 --tag hallway-v0
 """
+
 from __future__ import annotations
 
 import argparse
@@ -19,8 +20,8 @@ import time
 
 import numpy as np
 import torch
-from torch import nn
 import torch.optim as optim
+from torch import nn
 from tqdm import tqdm
 
 if __package__ in (None, ""):
@@ -44,7 +45,7 @@ def make_config(num_envs: int, max_time_steps: int) -> dict:
         "max_grad_norm": 0.5,
         "norm_adv": True,
         "clip_vloss": True,
-        "num_sgd_iter": 4,
+        "num_sgd_iter": 8,
         "lr": 5e-5,
         "gamma": 0.995,
         "lambda": 0.95,
@@ -77,12 +78,19 @@ def main():
     ap.add_argument("--num-envs", type=int, default=8)
     ap.add_argument("--max-steps", type=int, default=400)
     ap.add_argument("--checkpoint-every", type=int, default=20)
-    ap.add_argument("--no-teleop", action="store_true",
-                    help="disable random-teleop disturbance (debug only)")
+    ap.add_argument(
+        "--no-teleop",
+        action="store_true",
+        help="disable random-teleop disturbance (debug only)",
+    )
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--resume", type=str, default=None,
-                    help="path to a .pt checkpoint to resume from "
-                         "(continues iteration numbering, restores optimizer state)")
+    ap.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="path to a .pt checkpoint to resume from "
+        "(continues iteration numbering, restores optimizer state)",
+    )
     args = ap.parse_args()
 
     config = make_config(num_envs=args.num_envs, max_time_steps=args.max_steps)
@@ -113,15 +121,23 @@ def main():
         }
         print(
             f"[resume] from {resume_meta['from']} at iter={start_iteration}"
-            + ("" if resume_meta["had_optimizer_state"] else "  (NO optimizer state — Adam moments restart)")
+            + (
+                ""
+                if resume_meta["had_optimizer_state"]
+                else "  (NO optimizer state — Adam moments restart)"
+            )
         )
 
-    teleop = None if args.no_teleop else RandomTeleop(
-        env,
-        p_grab=config["teleop"]["p_grab"],
-        p_release=config["teleop"]["p_release"],
-        drift_speed=config["teleop"]["drift_speed"],
-        seed=args.seed,
+    teleop = (
+        None
+        if args.no_teleop
+        else RandomTeleop(
+            env,
+            p_grab=config["teleop"]["p_grab"],
+            p_release=config["teleop"]["p_release"],
+            drift_speed=config["teleop"]["drift_speed"],
+            seed=args.seed,
+        )
     )
 
     runs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runs")
@@ -130,7 +146,11 @@ def main():
     logger = RunLogger(runs_dir, tag=args.tag)
     logger.write_config(
         {
-            "ppo": {k: v for k, v in config.items() if k not in ("env_config", "model", "teleop")},
+            "ppo": {
+                k: v
+                for k, v in config.items()
+                if k not in ("env_config", "model", "teleop")
+            },
             "env": config["env_config"],
             "model": config["model"],
             "teleop": config["teleop"] if teleop is not None else None,
@@ -170,6 +190,10 @@ def main():
         obs_per_step = []
         ep_rewards: list = []
         ep_lengths: list = []
+        ep_reached_goal: list = []
+        # accumulate per-active-count formation errors across all episodes
+        # finished during this iteration
+        ep_form_err_by_active: dict = {1: [], 2: [], 3: [], 4: []}
 
         for step in range(T):
             global_step += nE
@@ -212,6 +236,10 @@ def main():
                 if d:
                     ep_rewards.append(accs[e].total_reward)
                     ep_lengths.append(accs[e].length)
+                    ep_reached_goal.append(bool(infos[e]["goal_reached"]))
+                    for k, v in accs[e].formation_err_by_active.items():
+                        if k in ep_form_err_by_active and v:
+                            ep_form_err_by_active[k].extend(v)
                     logger.log_episode(
                         accs[e].emit(
                             iteration=iteration,
@@ -226,7 +254,9 @@ def main():
 
         # --- advantages ------------------------------------------------
         with torch.no_grad():
-            next_value = agent.get_value(agent.format_input(next_obs, device)).to(device)
+            next_value = agent.get_value(agent.format_input(next_obs, device)).to(
+                device
+            )
             advantages = torch.zeros_like(rewards_buf)
             lastgaelam = 0.0
             for t in reversed(range(T)):
@@ -237,9 +267,14 @@ def main():
                     nextnonterminal = 1.0 - dones_buf[t + 1]
                     nextvalues = values_buf[t + 1]
                 nextnonterminal = nextnonterminal.unsqueeze(-1)
-                delta = rewards_buf[t] + config["gamma"] * nextvalues * nextnonterminal - values_buf[t]
+                delta = (
+                    rewards_buf[t]
+                    + config["gamma"] * nextvalues * nextnonterminal
+                    - values_buf[t]
+                )
                 advantages[t] = lastgaelam = (
-                    delta + config["gamma"] * config["lambda"] * nextnonterminal * lastgaelam
+                    delta
+                    + config["gamma"] * config["lambda"] * nextnonterminal * lastgaelam
                 )
             returns_buf = advantages + values_buf
 
@@ -257,7 +292,12 @@ def main():
 
                 with torch.no_grad():
                     approx_kl = ((ratio - 1) - logratio).mean().item()
-                    clip_frac = ((ratio - 1.0).abs() > config["clip_param"]).float().mean().item()
+                    clip_frac = (
+                        ((ratio - 1.0).abs() > config["clip_param"])
+                        .float()
+                        .mean()
+                        .item()
+                    )
 
                 mb_adv = advantages[mb_t]
                 if config["norm_adv"]:
@@ -284,14 +324,24 @@ def main():
                     v_max = torch.max(v_unclipped, v_clipped_loss)
                     v_loss = 0.5 * (v_max * active).sum() / norm
                 else:
-                    v_loss = 0.5 * (((newvalue - returns_buf[mb_t]) ** 2) * active).sum() / norm
+                    v_loss = (
+                        0.5
+                        * (((newvalue - returns_buf[mb_t]) ** 2) * active).sum()
+                        / norm
+                    )
 
                 ent_loss = (entropy * active).sum() / norm
-                loss = pg_loss - config["entropy_coeff"] * ent_loss + v_loss * config["vf_loss_coeff"]
+                loss = (
+                    pg_loss
+                    - config["entropy_coeff"] * ent_loss
+                    + v_loss * config["vf_loss_coeff"]
+                )
 
                 optimizer.zero_grad()
                 loss.backward()
-                grad_norm = nn.utils.clip_grad_norm_(agent.parameters(), config["max_grad_norm"])
+                grad_norm = nn.utils.clip_grad_norm_(
+                    agent.parameters(), config["max_grad_norm"]
+                )
                 optimizer.step()
 
                 last_pg = pg_loss.item()
@@ -299,11 +349,26 @@ def main():
                 last_ent = ent_loss.item()
                 last_kl = approx_kl
                 last_clip = clip_frac
-                last_grad = float(grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm)
+                last_grad = float(
+                    grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm
+                )
 
         # Active-only mean reward (teleop'd slots are zero by construction)
         mean_reward_iter = float(rewards_buf.sum().item()) / max(global_step, 1)
         mean_ep_len = float(np.mean(ep_lengths)) if ep_lengths else float("nan")
+        success_rate = (
+            float(np.mean(ep_reached_goal)) if ep_reached_goal else float("nan")
+        )
+
+        def _mean_or_nan(xs):
+            return float(np.mean(xs)) if xs else float("nan")
+
+        per_active_mean = {
+            k: _mean_or_nan(ep_form_err_by_active.get(k, []))
+            for k in (1, 2, 3, 4)
+        }
+        per_active_n = {k: len(ep_form_err_by_active.get(k, [])) for k in (1, 2, 3, 4)}
+
         wall = time.time() - start_time
         logger.log_iter(
             iter=iteration,
@@ -312,18 +377,33 @@ def main():
             policy_loss=last_pg,
             value_loss=last_vl,
             entropy=last_ent,
-            total_loss=last_pg + config["vf_loss_coeff"] * last_vl - config["entropy_coeff"] * last_ent,
+            total_loss=last_pg
+            + config["vf_loss_coeff"] * last_vl
+            - config["entropy_coeff"] * last_ent,
             approx_kl=last_kl,
             clip_frac=last_clip,
             grad_norm=last_grad,
             mean_reward=mean_reward_iter,
             mean_episode_length=mean_ep_len,
             lr=config["lr"],
+            success_rate=success_rate,
+            formation_error_active_1=per_active_mean[1],
+            formation_error_active_2=per_active_mean[2],
+            formation_error_active_3=per_active_mean[3],
+            formation_error_active_4=per_active_mean[4],
+            n_episodes_active_1=per_active_n[1],
+            n_episodes_active_2=per_active_n[2],
+            n_episodes_active_3=per_active_n[3],
+            n_episodes_active_4=per_active_n[4],
         )
         print(
             f"iter {iteration:4d}  rew {mean_reward_iter:+.4f}  "
+            f"succ {success_rate*100:5.1f}%  "
             f"pg {last_pg:+.4f}  v {last_vl:.4f}  ent {last_ent:+.3f}  "
-            f"kl {last_kl:+.4f}  ep_len {mean_ep_len:.1f}"
+            f"kl {last_kl:+.4f}  ep_len {mean_ep_len:.1f}  "
+            f"form[1/2/3/4]="
+            f"{per_active_mean[1]:.3f}/{per_active_mean[2]:.3f}/"
+            f"{per_active_mean[3]:.3f}/{per_active_mean[4]:.3f}"
         )
 
         if iteration % args.checkpoint_every == 0 or iteration == iter_hi - 1:
