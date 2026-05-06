@@ -20,6 +20,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from checkpoint import load_checkpoint
+from device_utils import pick_device
 from env_hallway import FormationHallwayEnv
 from model import Agent
 from render_hallway import HallwayRenderer
@@ -47,14 +48,17 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--reset-on-done", action="store_true",
                     help="auto-reset the env when an episode ends")
+    ap.add_argument("--device", type=str, default="auto",
+                    help="auto | cpu | cuda | mps")
     args = ap.parse_args()
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    device = torch.device("cpu")
+    device = pick_device(args.device)
+    print(f"[device] using {device}")
 
     env = FormationHallwayEnv(
-        {"num_envs": 1, "max_time_steps": args.max_steps, "device": "cpu"}
+        {"num_envs": 1, "max_time_steps": args.max_steps, "device": str(device)}
     )
     agent = _build_agent(env, device)
     ckpt = load_checkpoint(args.weights, device)
