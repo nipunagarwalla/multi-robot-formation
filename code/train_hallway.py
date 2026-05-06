@@ -36,6 +36,13 @@ from model import Agent
 from teleop import RandomTeleop
 
 
+def _parse_float_list(raw: str) -> list[float]:
+    vals = [float(x.strip()) for x in raw.split(",") if x.strip()]
+    if not vals:
+        raise argparse.ArgumentTypeError("expected comma-separated floats")
+    return vals
+
+
 def make_config(num_envs: int, max_time_steps: int) -> dict:
     return {
         "seed": 0,
@@ -69,6 +76,8 @@ def make_config(num_envs: int, max_time_steps: int) -> dict:
             "p_grab": 0.005,
             "p_release": 0.01,
             "drift_speed": 0.6,
+            "max_concurrent_grabs": 3,
+            "init_regime_dist": [0.05, 0.35, 0.35, 0.25],
         },
     }
 
@@ -99,9 +108,29 @@ def main():
         help="path to a .pt checkpoint to resume from "
         "(continues iteration numbering, restores optimizer state)",
     )
+    ap.add_argument("--p-grab", type=float, default=None)
+    ap.add_argument("--p-release", type=float, default=None)
+    ap.add_argument("--teleop-drift-speed", type=float, default=None)
+    ap.add_argument("--max-concurrent-grabs", type=int, default=None)
+    ap.add_argument(
+        "--init-regime-dist",
+        type=_parse_float_list,
+        default=None,
+        help="comma-separated probabilities for active counts 1,2,3,4",
+    )
     args = ap.parse_args()
 
     config = make_config(num_envs=args.num_envs, max_time_steps=args.max_steps)
+    if args.p_grab is not None:
+        config["teleop"]["p_grab"] = args.p_grab
+    if args.p_release is not None:
+        config["teleop"]["p_release"] = args.p_release
+    if args.teleop_drift_speed is not None:
+        config["teleop"]["drift_speed"] = args.teleop_drift_speed
+    if args.max_concurrent_grabs is not None:
+        config["teleop"]["max_concurrent_grabs"] = args.max_concurrent_grabs
+    if args.init_regime_dist is not None:
+        config["teleop"]["init_regime_dist"] = args.init_regime_dist
     config["seed"] = args.seed
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -155,6 +184,8 @@ def main():
             p_grab=config["teleop"]["p_grab"],
             p_release=config["teleop"]["p_release"],
             drift_speed=config["teleop"]["drift_speed"],
+            max_concurrent_grabs=config["teleop"]["max_concurrent_grabs"],
+            init_regime_dist=config["teleop"]["init_regime_dist"],
             seed=args.seed,
         )
     )

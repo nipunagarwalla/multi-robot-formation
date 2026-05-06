@@ -35,10 +35,10 @@ class _Grab:
     drift_speed: float
 
 
-# default mass on each active_count in {1,2,3,4} at episode start.
-# slightly over-weights the small-cluster regimes vs a uniform 0.25/each
-# because they were under-represented in earlier training runs.
-DEFAULT_INIT_REGIME_DIST = [0.10, 0.25, 0.30, 0.35]
+# Default mass on each active_count in {1,2,3,4} at episode start.
+# Prioritizes the hard 2/3-active regimes while keeping 4-active square
+# behavior represented. 1-active stays as a low-probability fallback regime.
+DEFAULT_INIT_REGIME_DIST = [0.05, 0.35, 0.35, 0.25]
 
 
 class RandomTeleop:

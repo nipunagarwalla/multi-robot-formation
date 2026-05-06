@@ -35,6 +35,19 @@ from model import Agent
 from teleop import RandomTeleop
 
 
+def apply_fixed_active_count(env: FormationHallwayEnv, env_idx: int, active_count: int) -> None:
+    """Hold robots active_count..N-1 under zero-velocity teleop for eval."""
+    if active_count < 1 or active_count > env.cfg["n_agents"]:
+        raise ValueError(
+            f"fixed active count must be in [1, {env.cfg['n_agents']}], got {active_count}"
+        )
+    for r in range(env.cfg["n_agents"]):
+        teleop_active = r >= active_count
+        env.set_teleop(env_idx, r, teleop_active)
+        if teleop_active:
+            env.set_teleop_action(env_idx, r, np.zeros(2, dtype=np.float32))
+
+
 def _build_agent(env, device):
     cfg = {
         "model": {
@@ -60,6 +73,13 @@ def main():
     ap.add_argument("--render", action="store_true")
     ap.add_argument("--teleop", action="store_true",
                     help="apply RandomTeleop disturbance during eval")
+    ap.add_argument(
+        "--fixed-active-count",
+        type=int,
+        choices=range(1, MAX_AGENTS + 1),
+        default=None,
+        help="hold robots outside the first N active slots under teleop for fixed-regime eval",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", type=str, default="auto",
                     help="auto | cpu | cuda | mps")
@@ -97,7 +117,11 @@ def main():
         )
     agent.eval()
 
-    teleop = RandomTeleop(env, seed=args.seed) if args.teleop else None
+    teleop = (
+        RandomTeleop(env, seed=args.seed)
+        if args.teleop and args.fixed_active_count is None
+        else None
+    )
 
     renderer = None
     clock = None
@@ -118,6 +142,10 @@ def main():
     if teleop is not None:
         for e in range(env.cfg["num_envs"]):
             teleop.reset_env(e)
+    if args.fixed_active_count is not None:
+        for e in range(env.cfg["num_envs"]):
+            apply_fixed_active_count(env, e, args.fixed_active_count)
+        obs = [env.get_obs(e) for e in range(env.cfg["num_envs"])]
     accs = [EpisodeAccumulator(env.cfg["n_agents"]) for _ in range(env.cfg["num_envs"])]
     t0 = time.time()
 
@@ -162,6 +190,9 @@ def main():
             env.reset_at(e)
             if teleop is not None:
                 teleop.reset_env(e)
+            if args.fixed_active_count is not None:
+                apply_fixed_active_count(env, e, args.fixed_active_count)
+            obs[e] = env.get_obs(e)
             if eps_done >= args.episodes:
                 break
 
@@ -193,6 +224,7 @@ def main():
         "mean_forward_velocity": float(np.mean([r["forward_velocity_mean"] for r in records])) if records else 0.0,
         "mean_formation_error": float(np.mean([r["formation_error_mean"] for r in records])) if records else 0.0,
         "per_regime": per_regime,
+        "fixed_active_count": args.fixed_active_count,
         "records": records,
     }
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
