@@ -86,6 +86,9 @@ class FormationHallwayEnv(gym.Env):
         cfg.setdefault("max_a", MAX_A)
         cfg.setdefault("min_a", MIN_A)
         cfg.setdefault("agent_radius", AGENT_RADIUS)
+        cfg.setdefault("agent_radius_start", cfg["agent_radius"])
+        cfg.setdefault("agent_radius_end", cfg["agent_radius"])
+        cfg.setdefault("agent_radius_curriculum_steps", 1)
         cfg.setdefault("max_time_steps", DEFAULT_MAX_TIME_STEPS)
         cfg.setdefault("pos_noise_std", 0.0)
         cfg.setdefault("formation_scale", FORMATION_SCALE)
@@ -113,6 +116,7 @@ class FormationHallwayEnv(gym.Env):
         )
 
         self.device = torch.device(cfg["device"])
+        self._curriculum_step = 0
         self.vec_p_shape = (cfg["num_envs"], n, 2)
 
         # stall detection: ring buffer of cluster centroids per env
@@ -151,6 +155,16 @@ class FormationHallwayEnv(gym.Env):
 
     def rand(self, size, a: float, b: float) -> torch.Tensor:
         return (b - a) * torch.rand(size, device=self.device) + a
+
+    def set_curriculum_step(self, step: int):
+        self._curriculum_step = max(0, int(step))
+
+    def current_agent_radius(self) -> float:
+        start = float(self.cfg["agent_radius_start"])
+        end = float(self.cfg["agent_radius_end"])
+        total = max(1, int(self.cfg["agent_radius_curriculum_steps"]))
+        alpha = min(1.0, self._curriculum_step / total)
+        return start + alpha * (end - start)
 
     # --- formation helper -----------------------------------------------
     def target_formation_positions(self, n: int) -> torch.Tensor:
@@ -240,7 +254,7 @@ class FormationHallwayEnv(gym.Env):
         slots = self.target_formation_positions(k).to(ps.device) + centroid  # (k, 2)
         cost = torch.cdist(active_ps, slots).cpu().numpy()
         row, col = linear_sum_assignment(cost)
-        coeff = self.cfg["reward_coeffs"]["k_form"]
+        coeff = float(self.cfg["reward_coeffs"]["k_form"]) * (k / max(1, n))
         dists = []
         for ri, ci in zip(row, col):
             robot = int(active_idx[ri].item())
@@ -285,12 +299,12 @@ class FormationHallwayEnv(gym.Env):
             trial = next_ps.clone()
             trial[:, i] += possible_vs[:, i] * cfg["dt"]
             d = self.compute_agent_dists(trial)[:, i]  # (nE, n) infs on diag
-            collide = torch.min(d, dim=1)[0] <= 2 * cfg["agent_radius"]
+            collide = torch.min(d, dim=1)[0] <= 2 * self.current_agent_radius()
             next_ps[~collide, i] = trial[~collide, i]
             rewards[collide, i] -= coeffs["k_coll"]
 
         # Wall containment in x
-        half_w = cfg["world_dim"][0] / 2.0 - cfg["agent_radius"]
+        half_w = cfg["world_dim"][0] / 2.0 - self.current_agent_radius()
         overshoot_x = (next_ps[:, :, X].abs() - half_w).clamp(min=0.0)
         rewards -= coeffs["k_wall"] * overshoot_x
         next_ps[:, :, X] = torch.clip(next_ps[:, :, X], -half_w, half_w)
