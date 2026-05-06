@@ -182,9 +182,14 @@ class EpisodeAccumulator:
         self.total_reward = 0.0
         self.num_collisions = 0
         self.num_wall_hits = 0
+        self.wall_contact_steps = 0
+        self.backward_steps = 0
         self.num_teleop_grabs = 0
         self.max_active = 0
         self.min_active = self.n_agents
+        self.wall_margin_sum = 0.0
+        self.wall_margin_count = 0
+        self.min_wall_margin = None
         self.formation_err_sum = 0.0
         self.formation_err_count = 0
         self.formation_err_by_active: Dict[int, List[float]] = defaultdict(list)
@@ -203,6 +208,9 @@ class EpisodeAccumulator:
         stalled: bool = False,
         had_collision: bool = False,
         had_wall_hit: bool = False,
+        had_wall_contact: bool = False,
+        backward_step: bool = False,
+        min_wall_margin: Optional[float] = None,
     ):
         self.length += 1
         rewards_l = list(per_agent_rewards)
@@ -211,6 +219,15 @@ class EpisodeAccumulator:
             self.num_collisions += 1
         if had_wall_hit:
             self.num_wall_hits += 1
+        if had_wall_contact:
+            self.wall_contact_steps += 1
+        if backward_step:
+            self.backward_steps += 1
+        if min_wall_margin is not None:
+            m = float(min_wall_margin)
+            self.wall_margin_sum += m
+            self.wall_margin_count += 1
+            self.min_wall_margin = m if self.min_wall_margin is None else min(self.min_wall_margin, m)
         self.max_active = max(self.max_active, active_count)
         self.min_active = min(self.min_active, active_count)
         if formation_err is not None and active_count >= 2:
@@ -243,6 +260,14 @@ class EpisodeAccumulator:
             "reached_goal": bool(reached_goal),
             "num_collisions": self.num_collisions,
             "num_wall_hits": self.num_wall_hits,
+            "wall_contact_steps": self.wall_contact_steps,
+            "backward_steps": self.backward_steps,
+            "mean_wall_margin": (
+                self.wall_margin_sum / max(self.wall_margin_count, 1)
+            ),
+            "min_wall_margin": (
+                0.0 if self.min_wall_margin is None else self.min_wall_margin
+            ),
             "num_teleop_grabs": self.num_teleop_grabs,
             "max_active_count": self.max_active,
             "min_active_count": self.min_active,

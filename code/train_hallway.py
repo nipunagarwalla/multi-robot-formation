@@ -69,13 +69,22 @@ def _score_eval(per_active: dict[int, dict]) -> float:
     successes = [float(v["success_rate"]) for v in per_active.values()]
     fwd = [float(v["mean_forward_velocity"]) for v in per_active.values()]
     forms = [float(v["mean_formation_error"]) for v in per_active.values()]
-    collisions = [float(v["mean_collisions"]) for v in per_active.values()]
+    collisions = [float(v.get("mean_collisions", 0.0)) for v in per_active.values()]
+    wall_hits = [float(v.get("mean_wall_hits", 0.0)) for v in per_active.values()]
+    wall_contacts = [float(v.get("mean_wall_contact_steps", 0.0)) for v in per_active.values()]
+    backward = [float(v.get("mean_backward_steps", 0.0)) for v in per_active.values()]
+    min_wall_margins = [float(v.get("mean_min_wall_margin", 1.0)) for v in per_active.values()]
+    wall_margin_shortfall = max(0.0, 0.12 - min(min_wall_margins))
     return float(
         1000.0 * min(successes)
         + 250.0 * float(np.mean(successes))
         + 25.0 * float(np.mean(fwd))
         - 50.0 * max(forms)
         - 0.5 * float(np.mean(collisions))
+        - 5.0 * float(np.mean(wall_hits))
+        - 3.0 * float(np.mean(wall_contacts))
+        - 10.0 * float(np.mean(backward))
+        - 100.0 * wall_margin_shortfall
     )
 
 
@@ -117,6 +126,9 @@ def _run_fixed_regime_eval(
                     stalled=bool(info["stalled"]),
                     had_collision=bool(info["collided"]),
                     had_wall_hit=bool(info["wall_hit"]),
+                    had_wall_contact=bool(info["wall_contact"]),
+                    backward_step=bool(info["backward_step"]),
+                    min_wall_margin=float(info["min_wall_margin"]),
                 )
                 if done[0]:
                     records.append(
@@ -144,6 +156,19 @@ def _run_fixed_regime_eval(
                     [float(r["formation_error_mean"]) for r in records]
                 ),
                 "mean_collisions": _mean_or_zero([float(r["num_collisions"]) for r in records]),
+                "mean_wall_hits": _mean_or_zero([float(r["num_wall_hits"]) for r in records]),
+                "mean_wall_contact_steps": _mean_or_zero(
+                    [float(r.get("wall_contact_steps", 0.0)) for r in records]
+                ),
+                "mean_backward_steps": _mean_or_zero(
+                    [float(r.get("backward_steps", 0.0)) for r in records]
+                ),
+                "mean_wall_margin": _mean_or_zero(
+                    [float(r.get("mean_wall_margin", 0.0)) for r in records]
+                ),
+                "mean_min_wall_margin": _mean_or_zero(
+                    [float(r.get("min_wall_margin", 0.0)) for r in records]
+                ),
             }
 
     eval_env.close()
@@ -436,6 +461,9 @@ def main():
                     stalled=bool(infos[e]["stalled"]),
                     had_collision=bool(infos[e]["collided"]),
                     had_wall_hit=bool(infos[e]["wall_hit"]),
+                    had_wall_contact=bool(infos[e]["wall_contact"]),
+                    backward_step=bool(infos[e]["backward_step"]),
+                    min_wall_margin=float(infos[e]["min_wall_margin"]),
                 )
             rewards_buf[step] = per_agent
             next_done = torch.as_tensor(done, dtype=torch.float32, device=device)
@@ -681,6 +709,8 @@ def main():
                     f"{k}:succ={row['success_rate']*100:.0f}%"
                     f",form={row['mean_formation_error']:.3f}"
                     f",vy={row['mean_forward_velocity']:+.2f}"
+                    f",wall={row['mean_wall_contact_steps']:.1f}"
+                    f",back={row['mean_backward_steps']:.1f}"
                 )
             print(
                 f"[eval] iter {iteration}  score={score:.2f}  "

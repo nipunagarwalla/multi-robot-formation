@@ -166,6 +166,9 @@ def main():
                 stalled=bool(infos[e]["stalled"]),
                 had_collision=bool(infos[e]["collided"]),
                 had_wall_hit=bool(infos[e]["wall_hit"]),
+                had_wall_contact=bool(infos[e]["wall_contact"]),
+                backward_step=bool(infos[e]["backward_step"]),
+                min_wall_margin=float(infos[e]["min_wall_margin"]),
             )
 
         if render:
