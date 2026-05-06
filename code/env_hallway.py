@@ -67,6 +67,12 @@ def _by_active(coeffs: dict, key: str, active_count: int, default: float = 0.0) 
     return float(table.get(active_count, table.get(str(active_count), default)))
 
 
+def _active_centroid(ps: torch.Tensor, active_mask: torch.Tensor) -> Optional[torch.Tensor]:
+    if not bool(active_mask.any().item()):
+        return None
+    return ps[active_mask].mean(dim=0)
+
+
 def target_formation_positions(n: int, scale: float = FORMATION_SCALE) -> torch.Tensor:
     """Return canonical formation slot positions, centred at origin.
 
@@ -206,6 +212,13 @@ class FormationHallwayEnv(gym.Env):
         self.teleop_vels = self.create_state_tensor()
         self.timesteps = torch.zeros(self.cfg["num_envs"], dtype=torch.int32, device=self.device)
         self.goal_reached = torch.zeros(self.cfg["num_envs"], dtype=torch.bool, device=self.device)
+        active = self.teleop_mask < 0.5
+        self.best_active_y = torch.stack(
+            [
+                _active_centroid(self.ps[e], active[e])[Y]
+                for e in range(self.cfg["num_envs"])
+            ]
+        ).to(self.device)
         for h in self._centroid_history:
             h.clear()
         return [self.get_obs(i) for i in range(self.cfg["num_envs"])]
@@ -220,6 +233,9 @@ class FormationHallwayEnv(gym.Env):
         self.teleop_vels[index] = 0.0
         self.timesteps[index] = 0
         self.goal_reached[index] = False
+        self.best_active_y[index] = _active_centroid(
+            self.ps[index], self.teleop_mask[index] < 0.5
+        )[Y]
         self._centroid_history[index].clear()
         return self.get_obs(index)
 
@@ -228,6 +244,9 @@ class FormationHallwayEnv(gym.Env):
         self.teleop_mask[env_idx, robot_idx] = 1.0 if active else 0.0
         if not active:
             self.teleop_vels[env_idx, robot_idx] = 0.0
+        centroid = _active_centroid(self.ps[env_idx], self.teleop_mask[env_idx] < 0.5)
+        if centroid is not None:
+            self.best_active_y[env_idx] = centroid[Y]
 
     def set_teleop_action(self, env_idx: int, robot_idx: int, vel):
         v = torch.as_tensor(vel, dtype=torch.float32, device=self.device)
@@ -335,6 +354,7 @@ class FormationHallwayEnv(gym.Env):
 
         # Per-agent collision check — update step-by-step so blamed agent eats penalty
         next_ps = self.ps.clone()
+        collision_flags = torch.zeros(nE, n, dtype=torch.bool, device=self.device)
         for i in range(n):
             trial = next_ps.clone()
             trial[:, i] += possible_vs[:, i] * cfg["dt"]
@@ -342,6 +362,7 @@ class FormationHallwayEnv(gym.Env):
             collide = torch.min(d, dim=1)[0] <= 2 * cfg["agent_radius"]
             next_ps[~collide, i] = trial[~collide, i]
             rewards[collide, i] -= coeffs["k_coll"]
+            collision_flags[collide, i] = True
 
         # Wall containment in x
         half_w = cfg["world_dim"][0] / 2.0 - cfg["agent_radius"]
@@ -365,6 +386,9 @@ class FormationHallwayEnv(gym.Env):
         # Formation + stall + goal — per env
         formation_errs: List[Optional[float]] = [None] * nE
         stalled_flags = [False] * nE
+        backward_flags = [False] * nE
+        wall_contact_flags = [False] * nE
+        min_wall_margins = [float("inf")] * nE
         for e in range(nE):
             penalty, err = self._formation_reward(e, self.ps[e])
             rewards[e] += penalty * active[e]
@@ -372,20 +396,80 @@ class FormationHallwayEnv(gym.Env):
 
             active_e = active[e].bool()
             if active_e.any():
-                centroid = self.ps[e][active_e].mean(dim=0)
-                prev_centroid = previous_ps[e][active_e].mean(dim=0)
+                centroid = _active_centroid(self.ps[e], active_e)
+                prev_centroid = _active_centroid(previous_ps[e], active_e)
                 active_count = int(active[e].sum().item())
+                disturbed = active_count < n or bool((self.teleop_mask[e] > 0.5).any().item())
                 centroid_dy = centroid[Y] - prev_centroid[Y]
-                rewards[e] += (
-                    _by_active(coeffs, "k_centroid_fwd_by_active", active_count, 0.0)
-                    * centroid_dy
-                    * active[e]
-                )
-                rewards[e] -= (
-                    _by_active(coeffs, "k_center_by_active", active_count, 0.0)
-                    * centroid[X].abs()
-                    * active[e]
-                )
+
+                active_wall_margin = half_w - self.ps[e, :, X].abs()
+                min_wall_margins[e] = float(active_wall_margin[active_e].min().item())
+                wall_contact = active_wall_margin <= 1e-5
+                wall_contact_flags[e] = bool((wall_contact & active_e).any().item())
+
+                if disturbed:
+                    rewards[e] += (
+                        _by_active(coeffs, "k_centroid_fwd_by_active", active_count, 0.0)
+                        * centroid_dy
+                        * active[e]
+                    )
+                    rewards[e] -= (
+                        _by_active(coeffs, "k_center_by_active", active_count, 0.0)
+                        * centroid[X].pow(2)
+                        * active[e]
+                    )
+
+                    progress = torch.clamp(centroid[Y] - self.best_active_y[e], min=0.0)
+                    if float(progress.item()) > 0.0:
+                        rewards[e] += (
+                            _by_active(coeffs, "k_progress_best_by_active", active_count, 0.0)
+                            * progress
+                            * active[e]
+                        )
+                    self.best_active_y[e] = torch.maximum(self.best_active_y[e], centroid[Y])
+
+                    backward = torch.clamp(-centroid_dy, min=0.0)
+                    if float(backward.item()) > 1e-6:
+                        backward_flags[e] = True
+                        rewards[e] -= (
+                            _by_active(coeffs, "k_backward_by_active", active_count, 0.0)
+                            * backward
+                            * active[e]
+                        )
+
+                    wall_safe = float(coeffs["wall_safe_margin"])
+                    wall_prox = (
+                        (wall_safe - active_wall_margin).clamp(min=0.0) / max(wall_safe, 1e-6)
+                    )
+                    rewards[e] -= (
+                        _by_active(coeffs, "k_wall_proximity_by_active", active_count, 0.0)
+                        * wall_prox.pow(2)
+                        * active[e]
+                    )
+                    rewards[e] -= (
+                        _by_active(coeffs, "k_wall_contact_by_active", active_count, 0.0)
+                        * wall_contact.float()
+                        * active[e]
+                    )
+
+                    teleop_e = self.teleop_mask[e].bool()
+                    if teleop_e.any():
+                        teleop_centroid = self.ps[e][teleop_e].mean(dim=0)
+                        to_teleop = teleop_centroid - prev_centroid
+                        dist = torch.linalg.norm(to_teleop)
+                        teleop_is_decoy = (
+                            float(dist.item()) >= float(coeffs["teleop_ignore_dist"])
+                            and (
+                                float(teleop_centroid[Y].item()) < float(prev_centroid[Y].item())
+                                or abs(float(teleop_centroid[X].item()))
+                                >= float(coeffs["teleop_ignore_lateral"])
+                            )
+                        )
+                        if teleop_is_decoy:
+                            unit = to_teleop / dist.clamp(min=1e-6)
+                            centroid_delta = centroid - prev_centroid
+                            chase = torch.clamp(torch.dot(centroid_delta, unit), min=0.0)
+                            rewards[e] -= float(coeffs["k_teleop_chase"]) * chase * active[e]
 
                 stall_pen = self._stall_penalty(e, centroid)
                 if stall_pen != 0.0:
@@ -411,7 +495,7 @@ class FormationHallwayEnv(gym.Env):
                 float((dy[e][active_e]).mean().item()) / cfg["dt"] if active_e.any() else 0.0
             )
             wall_hit = bool((overshoot_x[e] > 0).any().item())
-            collided = bool((rewards[e] <= -coeffs["k_coll"] + 1e-6).any().item())
+            collided = bool(collision_flags[e].any().item())
             infos.append(
                 {
                     "rewards": {k: float(rewards[e, k].item()) for k in range(n)},
@@ -421,6 +505,9 @@ class FormationHallwayEnv(gym.Env):
                     "fwd_velocity": mean_dy,
                     "stalled": stalled_flags[e],
                     "wall_hit": wall_hit,
+                    "wall_contact": wall_contact_flags[e],
+                    "min_wall_margin": min_wall_margins[e],
+                    "backward_step": backward_flags[e],
                     "collided": collided,
                 }
             )
