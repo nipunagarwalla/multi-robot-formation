@@ -55,6 +55,7 @@ def main():
     ap.add_argument("--teleop", action="store_true",
                     help="apply RandomTeleop disturbance during eval")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--out", default=None,
                     help="path for eval.json (defaults to alongside the weights)")
     args = ap.parse_args()
@@ -65,13 +66,13 @@ def main():
     render = args.render and not args.no_render
     if not render:
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-    device = torch.device("cpu")
+    device = torch.device(args.device)
 
     env = FormationHallwayEnv(
         {
             "num_envs": args.num_envs,
             "max_time_steps": args.max_steps,
-            "device": "cpu",
+            "device": args.device,
             "render": False,
         }
     )
