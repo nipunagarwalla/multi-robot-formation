@@ -56,6 +56,7 @@ def make_config(num_envs: int, max_time_steps: int) -> dict:
                 "msg_features": 32,
                 "comm_range": 2.0,
                 "use_masks": True,
+                "mask_teleop_edges": True,
             },
         },
         "env_config": {

@@ -35,6 +35,7 @@ def _build_agent(env, device):
                 "msg_features": 32,
                 "comm_range": 2.0,
                 "use_masks": True,
+                "mask_teleop_edges": True,
             }
         }
     }

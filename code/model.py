@@ -16,6 +16,17 @@ if __package__ in (None, ""):
 from device_utils import radius_graph_torch as radius_graph
 
 
+def _filter_edges_by_source(edge_index: torch.Tensor, source_node_mask: torch.Tensor) -> torch.Tensor:
+    """Drop message-passing edges whose source node is masked out.
+
+    ``radius_graph_torch`` returns edges in the orientation consumed by the
+    existing AFOR MessagePassing module: row 0 is target, row 1 is source.
+    """
+    source_ok = source_node_mask.reshape(-1).bool()
+    keep = source_ok[edge_index[1]]
+    return edge_index[:, keep]
+
+
 class ModGNNConv(MessagePassing):
     propagate_type = {"x": Tensor}
 
@@ -78,7 +89,13 @@ class GNNBranch(nn.Module):
             }
         )
 
-    def forward(self, p: torch.Tensor, x: torch.Tensor, comm_radius: torch.Tensor):
+    def forward(
+        self,
+        p: torch.Tensor,
+        x: torch.Tensor,
+        comm_radius: torch.Tensor,
+        source_node_mask: torch.Tensor | None = None,
+    ):
         assert x.ndim == 3  # batch and features
         assert p.ndim == 3  # batch and positions
         batch_size = x.shape[0]
@@ -91,6 +108,8 @@ class GNNBranch(nn.Module):
         edge_index = radius_graph(
             p.reshape(-1, p.shape[-1]), batch=batch, r=comm_radius[0], loop=True
         )
+        if source_node_mask is not None:
+            edge_index = _filter_edges_by_source(edge_index, source_node_mask)
         gnn_in = encoding_out.reshape(-1, encoding_out.shape[-1])
         gnn_out = self.gnn(gnn_in, edge_index).view(batch_size, n_agents, -1)
 
@@ -120,6 +139,7 @@ class Model(nn.Module):
         # Per-robot input features: [goal-pos (2), pos (2), pos+vel (2)] = 6 base
         # Optional appended bits: teleop_mask (1), present_mask (1) — gated by cfg
         self.use_masks = bool(cfg.get("use_masks", False))
+        self.mask_teleop_edges = bool(cfg.get("mask_teleop_edges", False))
         self.in_features = 8 if self.use_masks else 6
 
         self.gnn = GNNBranch(self.in_features, cfg["msg_features"], self.outputs_per_agent, activation)
@@ -135,9 +155,14 @@ class Model(nn.Module):
             tm = input_dict["teleop_mask"].unsqueeze(-1)
             pm = input_dict["present_mask"].unsqueeze(-1)
             feats += [tm, pm]
+            source_node_mask = None
+            if self.mask_teleop_edges:
+                source_node_mask = (pm.squeeze(-1) > 0.5) & (tm.squeeze(-1) < 0.5)
+        else:
+            source_node_mask = None
         x = torch.cat(feats, dim=-1)
-        outputs = self.gnn(pos, x, self.comm_range)
-        values = self.gnn_value(pos, x, self.comm_range)
+        outputs = self.gnn(pos, x, self.comm_range, source_node_mask=source_node_mask)
+        values = self.gnn_value(pos, x, self.comm_range, source_node_mask=source_node_mask)
         self._cur_value = values.view(-1, self.n_agents)
 
         return outputs.view(-1, self.n_agents * self.outputs_per_agent), state
