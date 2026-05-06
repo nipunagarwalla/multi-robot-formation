@@ -53,10 +53,14 @@ robots see the disturbance through a `teleop_mask` feature in their
 observation and learn to **re-form** around the missing teammate, then
 **re-absorb** it when it's released.
 
-After 4648 PPO iterations on a single CPU, the policy reaches the goal
-in **100% of 50 clean eval episodes** and **100% of 50 disturbed eval
-episodes**, with formation error of only **1.6 cm** (clean) — far below
-the agent radius of 8 cm.
+The previous long run proved the 4-robot square and 3-robot triangle
+can work, but it did not train the current v3 objective. This branch is
+the retraining-ready version: it samples 4-, 3-, 2-, and occasional
+1-active regimes from reset, supports multiple concurrent teleop grabs,
+masks teleop robots out of message passing and PPO loss, saves the best
+checkpoint by fixed-regime eval, and adds disturbance-gated rewards that
+discourage chasing a teleop robot or scraping along walls without
+changing clean four-robot rewards.
 
 The whole thing is built on a **graph neural network policy** (so that
 the model is permutation-invariant across robots and naturally handles
@@ -386,8 +390,8 @@ formation reverts.
 | Component | What it does |
 |---|---|
 | `FormationHallwayEnv` | env with up to 4 robots, dynamic target shape, teleop interface |
-| `RandomTeleop` | synthetic disturbance for training: occasionally grabs a robot, drives it sideways, releases it |
-| `KeyboardTeleop` | for the demo: 1-4 toggle, WASD drive |
+| `RandomTeleop` | synthetic disturbance for training: reset-time active-count sampling plus up to 3 concurrent grabs |
+| `KeyboardTeleop` | for the demo: 1-4 toggle, WASD drive, Z/X speed adjust |
 | Patched `model.py` | parametric `n_agents`, optional 8-dim per-robot input including the masks |
 | `train_hallway.py` | PPO trainer with **per-robot loss masking** by `(1 - teleop_mask)` |
 | `metrics.py` + `runs/<ts>/` | persistent CSV/JSONL/JSON for cross-run comparison |
@@ -429,15 +433,17 @@ afor/
 │   ├── fake_env.py               # contract-shaped stub
 │   └── test_formation.py         # 9 unit tests
 └── runs/                         # gitignored
-    └── 20260503_195621_hallway-v1/
+    └── <timestamp>_<tag>/
         ├── config.json
         ├── iterations.csv
         ├── episodes.jsonl
-        ├── eval_clean.json       # added by you after evaluation
-        ├── eval_teleop.json
+        ├── evals.jsonl           # with --save-best-on-eval
+        ├── best_eval.json
+        ├── eval.json             # from eval_hallway.py
         └── weights/
-            ├── weights_epoch200.pt … weights_epoch4600.pt
-            └── latest.pt → weights_epoch4600.pt
+            ├── weights_epoch{N}.pt
+            ├── latest.pt
+            └── best.pt           # with --save-best-on-eval
 ```
 
 ### 5.1 `code/contract.py` — the shared interface
@@ -538,8 +544,9 @@ These are unit-tested in `tests/test_formation.py`.
 **Step infos.** In addition to the per-agent reward, each step's info
 dict includes diagnostic fields the trainer plumbs into the metrics
 logger: `active_count`, `goal_reached`, `formation_error`,
-`fwd_velocity`, `stalled`, `wall_hit`, `collided`. See §7 for what
-each reward term computes.
+`fwd_velocity`, `stalled`, `wall_hit`, `collided`, `wall_contact`,
+`min_wall_margin`, and `backward_step`. See §7 for what each reward
+term computes.
 
 ### 5.3 `code/model.py` — encoder → GNN → policy + value heads
 
@@ -571,25 +578,31 @@ verified by the smoke check in §9 of plan.md.
 
 ### 5.4 `code/teleop.py` — RandomTeleop + KeyboardTeleop
 
-`RandomTeleop` runs **per env** during training. Internal state is one
-`_Grab` object per env (or None). Each call to `step()`:
+`RandomTeleop` runs **per env** during training. Internal state is a
+dict of active `_Grab` objects per env, so several robots can be held
+at once while still leaving at least one policy-controlled robot.
+Each call to `reset_env(e)` first samples an initial active count from
+`init_regime_dist` over `[1, 2, 3, 4]` and pre-holds the remaining
+robots under zero-velocity teleop. The default
+`[0.05, 0.35, 0.35, 0.25]` means: 5% solo, 35% line, 35% triangle,
+25% square at reset.
 
-1. If no grab is active: with prob `p_grab = 0.005`, pick a random
-   robot, sample a duration in `[40, 160]` steps, choose a left/right
-   drift direction. Set `env.set_teleop(e, robot, True)`.
-2. If a grab is active: drive the robot with a sinusoidal lateral
-   velocity `vx = drift_speed · drift_dir · cos(0.15 · age)` plus a
-   small `base_vy`. With prob `p_release = 0.01` per step or once the
-   duration elapses, call `env.set_teleop(e, robot, False)`.
+Each call to `step()` then:
 
-Critical limitation: **only ONE robot per env can be grabbed at a
-time**. This shapes what the policy sees during training — see §10.
+1. Starts additional grabs on free robots with `p_grab = 0.005`, up to
+   `max_concurrent_grabs = 3`.
+2. Drives non-initial grabs with a sinusoidal lateral velocity
+   `vx = drift_speed · drift_dir · cos(0.15 · age)` plus a small
+   `base_vy`.
+3. Releases each grab with `p_release = 0.01` per step or when its
+   sampled duration expires.
 
 `KeyboardTeleop` is the inference-time driver:
 
 - `1` / `2` / `3` / `4` toggle teleop on the corresponding robot.
 - `WASD` set the velocity of the *most recently selected* teleop
   robot. Other teleop'd robots are held in place (zero velocity).
+- `Z` / `X` decrease / increase the selected robot's teleop speed.
 - `0` releases all.
 
 Both classes call exactly `env.set_teleop(e, r, on/off)` and
@@ -597,7 +610,7 @@ Both classes call exactly `env.set_teleop(e, r, on/off)` and
 
 ### 5.5 `code/metrics.py` — RunLogger + EpisodeAccumulator
 
-`RunLogger` writes three append-only files per run:
+`RunLogger` writes the training artefacts for each run:
 
 - `config.json` — one-shot snapshot at the start of training: PPO
   hyperparameters, reward coefficients, env constants, teleop params,
@@ -610,7 +623,11 @@ Both classes call exactly `env.set_teleop(e, r, on/off)` and
   mean_episode_length, lr`. This is the *primary* learning-curve
   artefact — opens in pandas, Excel, anything.
 - `episodes.jsonl` — one JSON object per finished episode, with
-  per-cluster-size formation error, collisions, teleop grabs, etc.
+  per-cluster-size formation error, collisions, wall contact/backward
+  steps, wall margins, teleop grabs, etc.
+- `evals.jsonl` and `best_eval.json` — present when
+  `--save-best-on-eval` is enabled. These hold fixed-regime eval
+  records and the best record selected so far.
 
 `EpisodeAccumulator` is the per-env counter. The trainer ticks it
 each step and emits to `RunLogger` whenever `done` fires.
@@ -662,8 +679,9 @@ steps at real-time speed (`clock.tick(1/DT) = 20 Hz`).
 
 This is the heart of the system. One **PPO iteration** consists of a
 **rollout phase** (collect experience) followed by an **update phase**
-(do gradient steps on that experience). After 4648 such iterations,
-we had a converged policy.
+(do gradient steps on that experience). The current branch is set up
+for a full v3 retrain rather than relying on the older 4/3-active
+checkpoint.
 
 The trainer's main loop is `code/train_hallway.py:189`. Let's
 annotate it.
@@ -678,7 +696,7 @@ teleop = RandomTeleop(env, ...)                     # one shared instance
 logger = RunLogger("runs/", tag="hallway-v1")
 
 # pre-allocated buffers, sized for one rollout's worth of data
-# T = max_steps = 600, nE = num_envs = 16, nA = MAX_AGENTS = 4
+# T = max_steps, nE = num_envs, nA = MAX_AGENTS = 4
 actions_buf  = zeros(T, nE, nA, 2)
 logprobs_buf = zeros(T, nE, nA)
 rewards_buf  = zeros(T, nE, nA)
@@ -687,9 +705,9 @@ values_buf   = zeros(T, nE, nA)
 teleop_buf   = zeros(T, nE, nA)   # so we can mask the loss later
 ```
 
-### 6.2 Rollout phase (the inner loop, T = 600 steps)
+### 6.2 Rollout phase (the inner loop, T = `max_steps`)
 
-For each of the 600 timesteps:
+For each rollout timestep:
 
 1. **Observe.** Call `agent.format_input(next_obs, device)` to convert
    the list-of-dicts (one per env) into a batched tensor dict.
@@ -714,8 +732,8 @@ For each of the 600 timesteps:
    `episodes.jsonl`, reset the env at `e`, reset the teleop state for
    that env, and reset the accumulator.
 
-After 600 steps × 16 envs = **9600 env-steps of experience** are
-sitting in the buffers, with episode boundaries marked in `dones_buf`.
+After `max_steps × num_envs` env-steps of experience are sitting in
+the buffers, episode boundaries are marked in `dones_buf`.
 
 ### 6.3 GAE — going backwards in time
 
@@ -806,6 +824,11 @@ After the 8 SGD epochs, the trainer:
 - Every `checkpoint_every = 200` iterations (and on the last
   iteration), saves `{agent, optimizer, iteration}` and updates the
   `weights/latest.pt` symlink.
+- If `--save-best-on-eval` is enabled and the eval cadence fires, runs
+  fixed-active-count evals for 4, 3, and 2 active robots. The score is
+  worst-regime-first and penalizes wall hits, wall-contact steps,
+  backward active-cluster motion, and low wall margin before updating
+  `weights/best.pt`.
 
 Then we go back to step 6.2 with the next `iteration`. The env
 **does not reset** between iterations — each rollout picks up from
@@ -827,14 +850,28 @@ the coefficient was chosen.
 | **Forward progress** | `k_fwd = 5.0` | `+ k_fwd · dy` per step | The dominant per-step shaping signal. Without it, the policy has no early gradient direction; reaching the goal is too rare to discover from scratch. Coeff calibrated so 1 sec of full-speed forward motion ≈ +0.25 reward, accumulating to +50 over a successful episode. |
 | **Stall penalty** | `k_stall = 0.5` | `- k_stall` if cluster centroid moved < ε over last K steps | Without this, a policy can locally maximise reward by hovering near a high-reward area — e.g. holding formation perfectly while not moving. Penalty triggers if the centroid moved less than 2 cm over 20 steps (=1 second at 20 Hz). |
 | **Formation error** | `k_form = 2.0` | `- k_form · dist_to_assigned_slot` (Hungarian) | Pulls each robot toward its target slot. Hungarian assignment makes it permutation-invariant. Coeff calibrated so a 10 cm formation error costs 0.2/step ≈ 40 over an episode — comparable to the forward-progress reward, so neither dominates. |
+| **Disturbed active-centroid progress** | `{4:0,3:3,2:4,1:2}` | `+ k · dy_centroid` | Gives smaller active clusters a shared "move the cluster north" signal. It is gated to disturbed states so clean four-robot square behavior does not change. |
+| **Disturbed best-y progress** | `{4:0,3:3,2:4,1:1}` | `+ k · max(0, centroid_y - best_active_y)` | Rewards setting a new high-water mark after a robot is grabbed or released. This makes dragging the cluster back toward spawn unattractive. `best_active_y` resets when active membership changes. |
+| **Disturbed backward penalty** | `{4:0,3:8,2:10,1:4}` | `- k · max(0, -dy_centroid)` | Directly attacks the observed failure where the active cluster follows a teleop'd robot backward instead of continuing to the goal. The 2-active coefficient is strongest because the line regime was most fragile. |
+| **Disturbed centerline tracking** | `{4:0,3:0.75,2:1,1:0.25}` | `- k · centroid_x²` | Keeps small active clusters off the walls without pulling the clean four-robot square into a different lateral optimum. |
+| **Disturbed wall proximity/contact** | proximity `{4:0,3:2,2:3,1:1}`, contact `{4:0,3:2,2:3,1:1}` | penalty below `wall_safe_margin = 0.20 m`, plus contact penalty | Wall overshoot alone was not enough because the env clamps x at the wall; a policy could scrape along the boundary without much overshoot. This adds gradient before contact and a clearer penalty at contact. |
+| **Disturbed teleop-chase penalty** | `k_teleop_chase = 3.0` | penalize active-centroid motion toward a separated teleop robot | Stops the active cluster from treating a far teleop'd robot as a moving formation anchor. The penalty only turns on after distance/lateral thresholds so normal close-range reabsorption is still allowed. |
 | **Inter-robot collision** | `k_coll = 5.0` | `- k_coll` if any robot pair within `2 · AGENT_RADIUS` | Hard constraint expressed as a sharp penalty. Large enough that one collision wipes out several seconds of forward progress. Without it the formation can collapse onto a single point. |
 | **Wall overshoot** | `k_wall = 1.0` | `- k_wall · |overshoot_x|` | Soft barrier on the hallway walls. Linear in overshoot, so the policy can briefly graze a wall but pays for it. Combined with the env hard-clamping x to the wall, this creates a smooth gradient pulling robots toward the centre line. |
-| **Goal bonus** | `k_goal = 20.0` | `+ k_goal` once cluster centroid passes `GOAL_Y` (one-shot, episode terminates) | Sharp positive signal for the macro objective. One-shot to prevent "dancing on the goal line" exploits. Coeff is somewhat conservative — see §10, where bumping to 50 may help early training. |
+| **Goal bonus** | `k_goal = 20.0` | `+ k_goal` once cluster centroid passes `GOAL_Y` (one-shot, episode terminates) | Sharp positive signal for the macro objective. One-shot to prevent "dancing on the goal line" exploits while keeping shaped rewards meaningful during the approach. |
 
-Two rewards apply only to **active** robots (`teleop_mask[i] == 0`):
-forward progress and goal bonus are zeroed for teleop'd robots inside
-the env (`code/env_hallway.py:289`), and *all* terms get masked again
-in the trainer's loss for double safety.
+The key safety rule is **disturbance gating**. "Disturbed" means
+`active_count < MAX_AGENTS` or any robot is currently teleop'd. The
+new active-centroid, best-progress, backward, wall, and teleop-chase
+terms are disabled for a clean four-active square rollout. This was a
+deliberate constraint: increasing small-cluster monotonicity should
+not silently retune the original 4-robot behavior. The regression test
+`test_disturbance_rewards_do_not_change_clean_four_rewards` verifies
+that property by setting the new 4-active coefficients high and
+checking the clean four-robot reward is still unchanged.
+
+Teleop'd robots get zero reward inside the env, and all PPO losses are
+masked by `(1 - teleop_mask)` again in the trainer for double safety.
 
 ---
 
@@ -898,7 +935,7 @@ In practice the entropy term decays naturally as training progresses.
 
 ### 8.4 Fixed-length rollouts vs episodic batches
 
-**Chose:** fixed `T = 600` step rollouts, episodes can span
+**Chose:** fixed `T = max_steps` rollouts, episodes can span
 iteration boundaries.
 
 **Alternative:** collect exactly N complete episodes per iteration.
@@ -960,21 +997,25 @@ across runs. JSONL grows new fields without breaking historical files.
 project I'd add tensorboard back; for this prototype the simpler
 format won.
 
-### 8.8 Curriculum (no-teleop phase 1, then teleop) vs single phase
+### 8.8 Reset-time regime sampling vs waiting for random grabs
 
-**Recommended in README, but the actual successful run used
-single-phase.**
+**Chose:** sample the initial active count at reset with
+`init_regime_dist`, then also allow random multi-grabs during the
+episode.
 
-**Chose:** single phase with teleop on from iter 1, 4648 iterations.
+**Alternative:** start every episode as a clean square and rely on
+random teleop grabs to expose 3-, 2-, and 1-active states.
 
-**Why it worked:** the GNN policy is biased enough toward formation
-behaviour that teleop disturbance doesn't catastrophically prevent
-early learning. The disturbance is also rare (`p_grab = 0.005` →
-expected one grab per 200 steps per env), so early in training most
-steps are clean and look like the no-disturbance task anyway.
+**Why ours wins now:** waiting for random grabs under-samples the hard
+2-active line and makes the policy learn square first, then hope it
+generalises. Reset-time sampling makes every rollout contain direct
+training signal for the target regimes from step 0, while still keeping
+25% square starts by default.
 
-**Tradeoff:** marginally slower to converge than a curriculum would
-have been. But simpler to run and reason about.
+**Tradeoff:** the policy sees more disturbed states early in training,
+so the clean square task may improve more slowly. That is acceptable
+because the priority is one stable global 4/3/2 policy, and the clean
+four-robot reward surface is preserved by disturbance gating.
 
 ### 8.9 `MAX_AGENTS = 4` fixed buffer + masking vs variable-length tensors
 
@@ -996,161 +1037,115 @@ teleop'd) it's perfect.
 
 ---
 
-## 9. Empirical results
+## 9. Empirical status
 
-Numbers below are from `runs/20260503_195621_hallway-v1/`, which
-trained from scratch for 4648 PPO iterations on a single MacBook Pro
-CPU over ~19 hours. The full settings are pinned in the run's
-`config.json`:
+The important distinction: the older long run is **not** evidence that
+the current v3 objective is solved. It trained an earlier policy that
+handled the clean square and the 3-active triangle well, but it did not
+train the current 2-active line, wall-margin, anti-chase, and best-eval
+setup.
 
-```
---iterations 5000 --num-envs 16 --max-steps 600
---checkpoint-every 200 --seed 0
-PPO: γ=0.995, λ=0.95, clip=0.2, lr=5e-5, num_sgd_iter=8
-RandomTeleop: p_grab=0.005, p_release=0.01, drift_speed=0.6
-```
+### 9.1 Previous checkpoint result
 
-(The user interrupted at iter 4648, before the planned 5000.)
+The prior run, `runs/20260503_195621_hallway-v1/`, trained from scratch
+for 4648 PPO iterations on CPU. It reached 100% success in clean eval
+and 100% success with the older random-teleop disturbance, with very
+tight clean square formation. Its disturbed breakdown only contained
+4- and 3-active phases because that version of `RandomTeleop` grabbed
+one robot at a time.
 
-### 9.1 Headline numbers (after eval on 50 episodes per regime)
+Use that checkpoint as a proof that the base architecture can learn
+the hallway task. Do not present it as proof that the current 4/3/2
+global policy is stable.
 
-| Regime | Success rate | Mean reward | Episode length (sec) | Mean fwd velocity | Formation error |
-|---|---|---|---|---|---|
-| Clean (no teleop) | **100%** (50/50) | +244.90 | 13.9 s | 0.72 m/s | **1.6 cm** |
-| Disturbed (RandomTeleop on) | **100%** (50/50) | +187.84 | 16.9 s | 0.61 m/s | 3.1 cm overall, 8.4 cm in 3-active phases, 2.3 cm in 4-active phases |
+### 9.2 Current v3 implementation status
 
-For context: agent radius is 8 cm, formation slot spacing is 35 cm.
-A formation error of 1.6 cm means each robot is **within 5% of its
-target slot** — visually indistinguishable from the perfect square.
+| Need | Current implementation |
+|---|---|
+| Train 2-, 3-, and 4-active regimes | `init_regime_dist` samples active counts `[1,2,3,4]`; `max_concurrent_grabs=3` allows smaller active clusters during episodes. |
+| Stop active cluster chasing a teleop robot | Disturbed-only teleop-chase penalty plus GNN message-source masking for teleop robots. |
+| Stop smaller clusters from sliding along walls | Disturbed-only centerline, wall-proximity, and wall-contact rewards; episode/eval metrics track wall margin and contact steps. |
+| Keep clean 4-robot behavior unchanged | New shaping is disturbance-gated and has a clean-four invariance test. |
+| Avoid selecting a wall-scraping checkpoint | `--save-best-on-eval` scores fixed 4/3/2 evals and penalizes wall hits, wall contact, backward steps, and low wall margin. |
 
-### 9.2 Learning curve (bucketed from `episodes.jsonl`)
+### 9.3 Recommended retrain protocol
 
-```
-iter_bucket  episodes  success%   mean_R   mean_form_err   mean_collisions
-       0       4786     89.6%    -18.24    0.068           7.88
-     200       6007     99.7%   +140.15    0.045           3.72
-     400       6165     99.6%   +147.50    0.041           3.63
-     600       6224     99.8%   +169.02    0.039           2.01
-     800       6419     99.9%   +180.13    0.035           2.25  ← peak
-    1000       6526     99.5%   +176.41    0.037           1.43
-    1200       6434     98.8%   +163.96    0.038           1.88
-    1400       6004     97.6%   +153.89    0.038           1.64
-    ...
-    2200       4671     96.1%    +89.76    0.051           2.65  ← wobble #1
-    ...
-    3800       3991     73.4%    -27.21    0.063           3.80  ← wobble #2 (entropy spike?)
-    4000       4358     63.1%    +15.16    0.051           3.10
-    4200       5748     98.7%   +131.19    0.046           2.09  ← recovered
-    4400       5328     97.9%   +126.00    0.043           2.39
-    4600       1385     99.6%   +174.85    0.034           1.23  ← strong basin, latest.pt
-```
+Start from scratch for the next real policy. The observation/reward
+distribution changed enough that a resumed old checkpoint would spend
+early updates unlearning the old "follow the disturbed robot" behavior.
 
-**Three takeaways:**
+Representative command:
 
-1. **Strong early learning.** Success rate climbs from 89.6% to 99.9%
-   in the first 800 iters; mean episode reward goes from -18 to +180.
-   Formation error halves (0.07 → 0.035). Collisions drop 5×.
-2. **Two PPO wobbles** at iters ~2200 and ~3800. Both are classic
-   PPO instability signatures: too-large a policy update temporarily
-   degrades the value function, the policy chases the bad advantage
-   estimates, and learning regresses for ~200 iters before
-   stabilising. Both recovered. The wobbles correlate with `approx_kl`
-   spikes and `entropy` collapses in the CSV — a lower learning rate
-   or higher entropy coefficient would have damped them.
-3. **`latest.pt` (iter 4600) is in a strong basin.** Saving the
-   latest checkpoint was the right call this time; some runs you'd
-   instead want the *best-on-eval* checkpoint, which is a future
-   improvement.
-
-### 9.3 Per-active-count breakdown (disturbed eval)
-
-```
-formation_err per N : {'3': 0.0845, '4': 0.0233}
+```bash
+.venv/bin/python code/train_hallway.py \
+  --iterations 5000 \
+  --num-envs 16 \
+  --max-steps 400 \
+  --minibatch-steps 64 \
+  --checkpoint-every 100 \
+  --tag policy-v3-global \
+  --seed 0 \
+  --save-best-on-eval \
+  --eval-every 25 \
+  --eval-episodes 10 \
+  --eval-active-counts 4,3,2
 ```
 
-The policy holds 4-robot formation extremely tightly (2.3 cm) and
-3-robot formation acceptably (8.4 cm). The 8.4 cm is partly because
-the triangle requires more re-arrangement than the square (every
-robot may have to move when one drops out), and partly because
-3-active phases are a smaller fraction of total time — the policy
-has seen them less.
-
-Notably absent from this breakdown: keys `'2'` and `'1'`. **The
-policy has never seen 2-active or 1-active configurations during
-training**, because RandomTeleop only grabs one robot at a time. See
-§10.
+The checkpoint to demo should usually be `weights/best.pt`, not
+`weights/latest.pt`. Validate it with separate fixed-active-count evals
+for 4, 3, and 2 active robots, then run an interactive teleop demo and
+watch specifically for backward active-centroid motion and wall contact.
 
 ---
 
 ## 10. Known limitations
 
-Listed roughly in order of presentation impact (most likely to be
-asked about first).
+Listed roughly in order of presentation impact.
 
-### 10.1 The 2-robot line and 1-robot solo were never trained on
+### 10.1 No fully trained v3 checkpoint yet
 
-`RandomTeleop` is hardcoded to maintain at most one active grab per
-env. So during 4600 iterations of training, the policy saw cluster
-configurations with `n_active ∈ {3, 4}` only — never 2 or 1. The
-target-formation-positions for n=1 and n=2 are correctly defined in
-the env, but the policy has zero training signal for those regimes.
+The code path is implemented and smoke-tested, but the stable 4/3/2
+policy still requires a full retrain under the current reward and
+teleop distribution. This is the main caveat for any claim about final
+policy quality.
 
-**What this means for the demo:** "press 1 to teleop one robot →
-cluster forms triangle" works (verified, formation_err 8 cm). "Press
-1 then 2 → cluster forms line of two" depends on whether the policy
-generalises out-of-distribution. The GNN architecture *could* enable
-this (it's permutation-invariant and naturally handles different
-neighbour counts), but there's no guarantee.
+### 10.2 Reward parameters may still need one ablation pass
 
-**Fix (not yet implemented):** in `RandomTeleop`, allow multiple
-concurrent grabs. ~10 lines of change to `code/teleop.py`. Then resume
-training for 1000–2000 iters from `latest.pt` and the policy should
-learn 2-active and 1-active too.
-
-### 10.2 CPU-only training; never tested on GPU
-
-The whole pipeline runs on CPU. It works (~19 hours for 4648 iters
-at num_envs=16) but I never moved it to GPU. The model and rollouts
-are both small enough that GPU would only be a 2–4× speedup, but
-worth doing for longer sweeps. Would require changing `device="cpu"`
-to `"cuda"` in `make_config()` plus a one-line change in the env to
-move tensors to the GPU device.
+The coefficients are chosen to address the observed failures directly:
+anti-chase, monotonic active-cluster progress, and wall avoidance. The
+important guardrail is that the new terms are disturbance-gated, so
+clean four-robot rewards remain unchanged. After the full run, inspect
+per-active formation error, wall-contact steps, backward steps, and
+success rate before making further coefficient changes.
 
 ### 10.3 No formation rotation
 
 The target formation is always axis-aligned (square's sides parallel
-to x/y, triangle's apex pointing +y). In a real setting you might
-want the formation to rotate to face the direction of travel. For a
-straight hallway this doesn't matter; for curved environments it
-would.
+to x/y, triangle's apex pointing +y). In a real setting you might want
+the formation to rotate to face the direction of travel. For a straight
+hallway this does not matter; for curved environments it would.
 
 ### 10.4 No obstacle generalisation
 
 The hallway is empty. The original AFOR baseline handles obstacles
-(staggered walls). If the goal were "dynamic formation in cluttered
-environments", we'd need to either (a) re-introduce obstacles in
-`env_hallway.py` or (b) keep the obstacle-aware reward terms from
+(staggered walls). If the goal were dynamic formation in cluttered
+environments, we would need to re-introduce obstacles in
+`env_hallway.py` or keep the obstacle-aware reward terms from
 `env_line.py`. Out of scope for this iteration.
 
-### 10.5 PPO instability at iters ~2200 and ~3800
+### 10.5 All-four teleop is a demo edge case
 
-Both wobbles recovered, but they're real and would have looked bad if
-the run had been killed mid-wobble. Mitigation:
+`RandomTeleop` caps concurrent grabs at `n_agents - 1`, so at least one
+robot remains policy-controlled during training. Keyboard teleop can
+still toggle all four robots in the demo; that is useful for manual
+control but does not produce meaningful PPO learning signal.
 
-- Lower learning rate (5e-5 → 3e-5) — more stable, slower convergence.
-- Higher entropy coefficient (0.001 → 0.01) — prevents premature
-  policy collapse.
-- Implement `--save-best-on-eval` so we keep the strongest checkpoint
-  rather than just `latest.pt`.
+### 10.6 Device acceleration should still be measured
 
-### 10.6 The headline `mean_reward` in iterations.csv is a cumulative ratio
-
-`code/train_hallway.py` computes `mean_reward = total_reward / global_step`
-where both quantities are cumulative across all iterations. So the
-"mean_reward" column in the CSV decays toward 0 over time even as
-per-iteration rewards improve. The truthful learning curve comes from
-the bucketed analysis of `episodes.jsonl` (shown in §9.2), not the
-headline column. Worth fixing in a follow-up.
+The trainer can pick `cuda`, `mps`, or `cpu`, and rollouts are tensorized
+to reduce Python overhead. A full long v3 training run on the target
+machine still needs wall-clock measurement; do not quote the old CPU
+runtime as the expected v3 runtime.
 
 ---
 
@@ -1241,9 +1236,10 @@ approach has microscopic overhead for huge simplicity gains.
 Then the active-mask sum is 0, which is clamped to 1 in the
 normalisation. No gradient flows through the policy that step (zero
 contribution to the loss). The env still steps, the teleop'd robots
-still move, but training is paused for that env-step. This never
-happens with `RandomTeleop` (single-grab limit) but can happen during
-the demo if you press 1, 2, 3, and 4 in sequence.
+still move, but training is paused for that env-step. This does not
+happen under `RandomTeleop` because it caps grabs at `n_agents - 1`,
+but it can happen during the demo if you press 1, 2, 3, and 4 in
+sequence.
 
 **Q8 — Why dt = 0.05? Why max_v = 1.0?**
 
@@ -1251,19 +1247,18 @@ the demo if you press 1, 2, 3, and 4 in sequence.
 robotics envs — fast enough that velocity changes feel responsive,
 slow enough that PPO sees enough state change per step to learn from.
 `max_v = 1.0` m/s is borrowed from the AFOR baseline; it makes the
-hallway traversal time at full speed = 10 sec, so an episode of 600
-steps (= 30 sec) gives the cluster three "tries" worth of time to
-get to the goal.
+hallway traversal time at full speed about 10 sec. `max_steps` controls
+how many tries the cluster gets before truncation. Keyboard teleop uses
+a separate higher clamp so a human can pull a robot away from the
+cluster.
 
-**Q9 — Your CSV says `mean_reward` is going down over iterations. Is that bad?**
+**Q9 — Which metric should decide whether the policy is good?**
 
-That column is misleadingly defined as `total_reward / global_step`
-where both are *cumulative* across iterations — so it asymptotically
-decays as global_step grows, even when per-iteration rewards are
-improving. The real learning curve is in `episodes.jsonl` analysed
-in §9.2, which shows mean episode reward climbing from -18 to +180
-over the first 800 iters and stabilising in the +130 to +180 range
-thereafter. This is a known minor reporting bug (§10.6).
+Do not rely on one scalar reward. Use fixed-active-count evals for
+4, 3, and 2 active robots, then check success rate, formation error,
+forward velocity, wall-contact steps, backward steps, and minimum wall
+margin. `--save-best-on-eval` combines those into a conservative
+worst-regime-first score for checkpoint selection.
 
 **Q10 — Why `MAX_AGENTS = 4` and not, say, 6 or 8?**
 
@@ -1275,10 +1270,10 @@ and re-train, but the architecture would handle it without changes.
 
 **Q11 — How long would training take on a GPU?**
 
-Estimated 4–6 hours for the same 4648 iterations (vs 19 hours on
-CPU). The bottleneck is the rollout phase, not the update — and the
-env runs in PyTorch tensors so it does benefit from GPU. Not
-verified.
+The code supports `--device auto`, which chooses CUDA, then MPS, then
+CPU. The tensorized rollout/update path should benefit from accelerator
+backends, but the v3 long run still needs to be measured on the target
+machine before quoting a number.
 
 **Q12 — Could this transfer to real robots?**
 
@@ -1294,31 +1289,31 @@ real robot platform.
 
 **Q13 — What's the wall-clock cost of one PPO iteration?**
 
-At `num_envs=16, max_steps=600, num_sgd_iter=8`, each iteration is
-~14 seconds on the CPU — 9.6k env-steps for the rollout plus 8 ×
-600 = 4800 minibatch updates. Most of the time is the rollout (env
-step + policy forward pass).
+It depends on `num_envs`, `max_steps`, `minibatch_steps`, and device.
+The important scaling is that each iteration collects
+`num_envs × max_steps` env-steps, then runs 8 PPO epochs over flattened
+`(time, env)` minibatches. Use a short smoke run to estimate the target
+machine before committing to a full retrain.
 
 **Q14 — Why does the policy slow down to 0.72 m/s when max is 1.0?**
 
-The cluster trades forward speed for formation tightness. Going at
-full speed makes formation harder to maintain — robots overshoot
-their target slots. At 0.72 m/s the policy has found a sweet spot
-where the formation reward and forward reward are jointly maximised.
-You could push it faster by lowering `k_form` relative to `k_fwd`,
-but at the cost of looser formation.
+That number came from the older checkpoint. In general, the cluster
+will trade forward speed for formation tightness and wall safety.
+For v3, judge speed together with fixed-regime success, wall margin,
+and formation error. A faster but wall-scraping 2-active line should
+not be considered better.
 
 **Q15 — What single change would most improve the project?**
 
-Letting `RandomTeleop` grab multiple robots concurrently, then
-resume-training the existing checkpoint for 1000–2000 more iters.
-That's the only thing standing between us and "demonstrably handles
-2-robot line and 1-robot solo regimes". A 10-line code change and a
-~3-hour training run.
+Complete the full v3 retrain from scratch with `--save-best-on-eval`,
+then evaluate `weights/best.pt` separately on fixed 4-, 3-, and
+2-active rollouts. The code changes that were blocking this are now in
+place; the remaining work is empirical validation.
 
 ---
 
 *End of study guide. If you remember nothing else: **single shared
 GNN policy, Beta-distribution actions, PPO with per-robot loss
 masking by `(1 - teleop_mask)`, Hungarian-assigned formation reward,
-100% success rate after 4600 iterations**.*
+disturbance-gated anti-chase/wall rewards, and best-checkpoint
+selection by fixed 4/3/2 eval**.*

@@ -100,10 +100,13 @@ afor/
         ├── config.json
         ├── iterations.csv
         ├── episodes.jsonl
+        ├── evals.jsonl           # appears with --save-best-on-eval
+        ├── best_eval.json        # best periodic eval record so far
         ├── eval.json             # appears after running eval_hallway.py
         └── weights/
             ├── weights_epoch{N}.pt
-            └── latest.pt          # symlink -> most recent
+            ├── latest.pt          # symlink -> most recent
+            └── best.pt            # symlink -> best eval score, when enabled
 ```
 
 ---
@@ -159,21 +162,19 @@ For a real training run, scale up:
 
 ```bash
 .venv/bin/python code/train_hallway.py \
-    --resume runs/20260503_195621_hallway-v1/weights/latest.pt \
-    --iterations 1500 --num-envs 16 --max-steps 500 \
-    --minibatch-steps 64 --checkpoint-every 50 \
-    --device auto --tag stable-432-v1 \
-    --init-regime-dist 0.02,0.38,0.38,0.22 \
-    --save-best-on-eval --eval-every 50 --eval-episodes 10
+    --iterations 5000 --num-envs 16 --max-steps 400 \
+    --minibatch-steps 64 --checkpoint-every 100 \
+    --device auto --tag policy-v3-global \
+    --save-best-on-eval --eval-every 25 --eval-episodes 10 \
+    --eval-active-counts 4,3,2
 ```
 
-For the current v3 policy work, prefer resuming from the strong
-`hallway-v1` checkpoint instead of starting from scratch. The model
-parameter shapes are checkpoint-compatible, and `hallway-v1` already
-has reliable 4-robot square and 3-robot triangle behavior; the v3
-training pass should specialize it for stable 3- and 2-active regimes.
-Use from-scratch training only when you intentionally want to validate
-the new reward stack without inherited behavior.
+For the current v3 policy work, prefer starting from scratch. The reward
+distribution now includes disturbed-only anti-chase, best-progress,
+backward, and wall-margin terms, plus reset-time 2/3/4 regime sampling.
+Resuming from the older `hallway-v1` checkpoint is checkpoint-compatible,
+but early updates may spend time unlearning the old behavior that let the
+active cluster follow a teleop'd robot.
 
 `--save-best-on-eval` is recommended for real runs. PPO can wobble, so
 the last checkpoint is not necessarily the best one. The trainer scores
@@ -217,8 +218,9 @@ and the renderer).
 
 **Step infos** include the per-agent reward dict plus
 `active_count`, `goal_reached`, `formation_error`, `fwd_velocity`,
-`stalled`, `wall_hit`, `collided` — all consumed by
-`EpisodeAccumulator` for the `episodes.jsonl` log.
+`stalled`, `wall_hit`, `collided`, `wall_contact`, `min_wall_margin`,
+and `backward_step` — all consumed by `EpisodeAccumulator` for the
+`episodes.jsonl` log.
 
 ---
 
@@ -233,8 +235,12 @@ robot `i`:
 | Forward progress | `+ k_fwd * dy_i` | `5.0` |
 | Stall penalty | `- k_stall` if cluster centroid moved < `eps` over last `K` steps | `0.5`, `K = 20`, `eps = 0.02` |
 | Formation error | `- k_form * active_count_multiplier * dist_to_assigned_slot` (Hungarian-matched per step) | `2.0 × {4:1.0, 3:1.5, 2:2.25}` |
-| Active centroid forward progress | `+ k_centroid_fwd_by_active[n] * dy_centroid` | `{4:2.0, 3:3.0, 2:4.0, 1:2.0}` |
-| Centerline tracking | `- k_center_by_active[n] * abs(active_centroid_x)` | `{4:0.25, 3:0.5, 2:0.75, 1:0.25}` |
+| Disturbed active-centroid forward progress | `+ k_centroid_fwd_by_active[n] * dy_centroid` | `{4:0.0, 3:3.0, 2:4.0, 1:2.0}` |
+| Disturbed best-y progress | `+ k_progress_best_by_active[n] * max(0, active_centroid_y - best_active_y)` | `{4:0.0, 3:3.0, 2:4.0, 1:1.0}` |
+| Disturbed backward penalty | `- k_backward_by_active[n] * max(0, -dy_centroid)` | `{4:0.0, 3:8.0, 2:10.0, 1:4.0}` |
+| Disturbed centerline tracking | `- k_center_by_active[n] * active_centroid_x^2` | `{4:0.0, 3:0.75, 2:1.0, 1:0.25}` |
+| Disturbed wall proximity/contact | penalty when active robots get within `wall_safe_margin` of a wall, plus contact penalty | `safe_margin=0.20`, proximity `{4:0.0, 3:2.0, 2:3.0, 1:1.0}`, contact `{4:0.0, 3:2.0, 2:3.0, 1:1.0}` |
+| Disturbed teleop-chase penalty | penalize active-centroid motion toward a separated teleop robot | `k_teleop_chase=3.0`, ignore distance `0.6`, lateral threshold `0.35` |
 | Inter-robot collision | `- k_coll` if any pairwise dist < `2 * AGENT_RADIUS` | `5.0` |
 | Wall overshoot | `- k_wall * |overshoot_x|` | `1.0` |
 | Goal bonus | `+ k_goal` once cluster centroid passes `GOAL_Y` (one-shot) | `20.0` |
@@ -243,10 +249,13 @@ Teleop'd robots get a per-step reward of 0; the trainer additionally
 masks their gradient contribution to zero.
 
 The v3 reward defaults deliberately prioritize one stable global policy
-for active counts 4, 3, and 2. The stronger 3/2 formation multipliers,
-active-centroid forward reward, and centerline penalty are meant to keep
-small clusters moving down the hallway instead of drifting toward a
-teleop'd robot.
+for active counts 4, 3, and 2. The new active-centroid, best-progress,
+backward, wall, and teleop-chase terms are **disturbance gated**: they
+apply only when the active cluster is smaller than the full robot count
+or at least one robot is currently teleop'd. A clean four-robot square
+rollout therefore keeps the original reward surface; `tests/test_formation.py`
+has a regression test that sets the new four-active coefficients high
+and confirms the clean four-robot reward is unchanged.
 
 ---
 
@@ -373,7 +382,9 @@ want fewer, larger optimizer batches; decrease it if memory gets tight.
 `best_eval.json` with the best record so far. The score is intentionally
 worst-regime-first across active counts 4, 3, and 2, so a policy that is
 excellent for square but poor for 2-robot line will not replace
-`weights/best.pt`.
+`weights/best.pt`. The score also penalizes wall hits, wall-contact
+steps, backward active-cluster steps, and very low wall margins, so a
+checkpoint that reaches the goal by dragging along a wall should not win.
 
 ### Resuming a run
 
@@ -502,7 +513,8 @@ mean_episode_length, lr`.
 
 **`episodes.jsonl`** records (one per `done` event):
 `iter, env_id, episode_length, total_reward, reached_goal,
-num_collisions, num_wall_hits, num_teleop_grabs, max_active_count,
+num_collisions, num_wall_hits, wall_contact_steps, backward_steps,
+mean_wall_margin, min_wall_margin, num_teleop_grabs, max_active_count,
 min_active_count, formation_error_mean,
 formation_error_per_active_count, forward_velocity_mean, stall_steps`.
 
@@ -551,9 +563,13 @@ If `matplotlib` is installed, also writes
 - centroid at origin, equilateral triangle, square sides, line horizontal
 - env step shapes
 - teleop override + release round-trip, including separate teleop speed clamp
+- clean four-robot reward invariance for the disturbed-only shaping terms
+- disturbed-cluster penalties/rewards for backward motion, best progress,
+  wall proximity, and chasing a separated teleop robot
 
 Additional tests cover keyboard teleop speed controls, fixed-active-count
-eval setup, GNN teleop-edge masking, and the tensorized training fast path.
+eval setup, wall-aware eval scoring, GNN teleop-edge masking, and the
+tensorized training fast path.
 
 `tests/fake_env.py` is a ~80-line stub satisfying the env contract,
 used both inside the formal tests and by `code/teleop.py --demo` so
@@ -586,8 +602,8 @@ Deliberately not in v1 — see `plan.md` Section 8:
 - No multi-policy ensemble per cluster size — one shared policy.
 - No obstacle generalisation — the hallway is empty.
 - The v3 reward/model changes are implemented and smoke-tested, but the
-  resulting stable 4/3/2 policy still needs a real resumed training run
-  and fixed-active-count evaluation.
+  resulting stable 4/3/2 policy still needs a real from-scratch
+  training run and fixed-active-count evaluation.
 
 ---
 
