@@ -26,3 +26,14 @@
    - Added `scripts_run_pipeline.sh`.
    - Script runs: training -> evaluation -> run comparison.
    - Prints locations of `config.json`, `iterations.csv`, `episodes.jsonl`, and `eval.json` for immediate inspection.
+
+## Follow-up fixes
+
+6. **Removed deprecated PyG API usage**
+   - Replaced `ModGNNConv(...).jittable()` with `ModGNNConv(...)` in `code/model.py` to eliminate the deprecation warning (`jittable` is now a no-op).
+
+7. **Full-training pipeline defaults + pygame visualization**
+   - Updated `scripts_run_pipeline.sh` defaults to full training settings:
+     - `ITERATIONS=5000`, `NUM_ENVS=16`, `MAX_STEPS=400`.
+   - Added a rendered pygame evaluation stage after headless eval, enabled by default with `VISUALIZE=1`.
+   - Added `VIS_EPISODES` to control rendered episode count (default `1`).
