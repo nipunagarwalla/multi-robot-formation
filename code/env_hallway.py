@@ -35,12 +35,36 @@ from contract import (
     MIN_A,
     REWARD_COEFFS,
     SPAWN_Y,
+    TELEOP_MAX_A,
+    TELEOP_MAX_V,
     WORLD_H,
     WORLD_W,
 )
 
 X = 0
 Y = 1
+
+
+def _merged_reward_coeffs(overrides: Optional[dict] = None) -> dict:
+    coeffs = dict(REWARD_COEFFS)
+    for key, value in REWARD_COEFFS.items():
+        if isinstance(value, dict):
+            coeffs[key] = dict(value)
+    for key, value in (overrides or {}).items():
+        if isinstance(value, dict) and isinstance(coeffs.get(key), dict):
+            merged = dict(coeffs[key])
+            merged.update(value)
+            coeffs[key] = merged
+        else:
+            coeffs[key] = value
+    return coeffs
+
+
+def _by_active(coeffs: dict, key: str, active_count: int, default: float = 0.0) -> float:
+    table = coeffs.get(key, {})
+    if not isinstance(table, dict):
+        return float(default)
+    return float(table.get(active_count, table.get(str(active_count), default)))
 
 
 def target_formation_positions(n: int, scale: float = FORMATION_SCALE) -> torch.Tensor:
@@ -85,6 +109,8 @@ class FormationHallwayEnv(gym.Env):
         cfg.setdefault("max_v", MAX_V)
         cfg.setdefault("max_a", MAX_A)
         cfg.setdefault("min_a", MIN_A)
+        cfg.setdefault("teleop_max_v", TELEOP_MAX_V)
+        cfg.setdefault("teleop_max_a", TELEOP_MAX_A)
         cfg.setdefault("agent_radius", AGENT_RADIUS)
         cfg.setdefault("max_time_steps", DEFAULT_MAX_TIME_STEPS)
         cfg.setdefault("pos_noise_std", 0.0)
@@ -92,7 +118,7 @@ class FormationHallwayEnv(gym.Env):
         cfg.setdefault("render_px_per_m", DEFAULT_RENDER_PX_PER_M)
         cfg.setdefault("spawn_y", SPAWN_Y)
         cfg.setdefault("goal_y", GOAL_Y)
-        cfg.setdefault("reward_coeffs", dict(REWARD_COEFFS))
+        cfg["reward_coeffs"] = _merged_reward_coeffs(cfg.get("reward_coeffs"))
         cfg.setdefault("render", False)
         self.cfg = cfg
 
@@ -205,7 +231,7 @@ class FormationHallwayEnv(gym.Env):
 
     def set_teleop_action(self, env_idx: int, robot_idx: int, vel):
         v = torch.as_tensor(vel, dtype=torch.float32, device=self.device)
-        v = torch.clamp(v, -self.cfg["max_v"], self.cfg["max_v"])
+        v = torch.clamp(v, -self.cfg["teleop_max_v"], self.cfg["teleop_max_v"])
         self.teleop_vels[env_idx, robot_idx] = v
 
     # --- obs -------------------------------------------------------------
@@ -240,7 +266,8 @@ class FormationHallwayEnv(gym.Env):
         slots = self.target_formation_positions(k).to(ps.device) + centroid  # (k, 2)
         cost = torch.cdist(active_ps, slots).cpu().numpy()
         row, col = linear_sum_assignment(cost)
-        coeff = self.cfg["reward_coeffs"]["k_form"]
+        coeffs = self.cfg["reward_coeffs"]
+        coeff = coeffs["k_form"] * _by_active(coeffs, "k_form_by_active", int(k), 1.0)
         dists = []
         for ri, ci in zip(row, col):
             robot = int(active_idx[ri].item())
@@ -271,9 +298,17 @@ class FormationHallwayEnv(gym.Env):
         mask3 = self.teleop_mask.unsqueeze(-1)  # (nE, n, 1)
         actions_t = actions_t * (1.0 - mask3) + self.teleop_vels * mask3
 
-        desired_vs = torch.clip(actions_t, -cfg["max_v"], cfg["max_v"])
+        speed_limits = (
+            (1.0 - mask3) * float(cfg["max_v"])
+            + mask3 * float(cfg["teleop_max_v"])
+        )
+        desired_vs = torch.maximum(torch.minimum(actions_t, speed_limits), -speed_limits)
         desired_as = (desired_vs - self.measured_vs) / cfg["dt"]
-        possible_as = torch.clip(desired_as, cfg["min_a"], cfg["max_a"])
+        accel_limits = (
+            (1.0 - mask3) * float(cfg["max_a"])
+            + mask3 * float(cfg["teleop_max_a"])
+        )
+        possible_as = torch.maximum(torch.minimum(desired_as, accel_limits), -accel_limits)
         possible_vs = self.measured_vs + possible_as * cfg["dt"]
 
         previous_ps = self.ps.clone()
@@ -319,6 +354,20 @@ class FormationHallwayEnv(gym.Env):
             active_e = active[e].bool()
             if active_e.any():
                 centroid = self.ps[e][active_e].mean(dim=0)
+                prev_centroid = previous_ps[e][active_e].mean(dim=0)
+                active_count = int(active[e].sum().item())
+                centroid_dy = centroid[Y] - prev_centroid[Y]
+                rewards[e] += (
+                    _by_active(coeffs, "k_centroid_fwd_by_active", active_count, 0.0)
+                    * centroid_dy
+                    * active[e]
+                )
+                rewards[e] -= (
+                    _by_active(coeffs, "k_center_by_active", active_count, 0.0)
+                    * centroid[X].abs()
+                    * active[e]
+                )
+
                 stall_pen = self._stall_penalty(e, centroid)
                 if stall_pen != 0.0:
                     rewards[e] += stall_pen * active[e]

@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 import torch
 
-from contract import FORMATION_SCALE, MAX_AGENTS
+from contract import FORMATION_SCALE, MAX_AGENTS, MAX_V, TELEOP_MAX_V
 from env_hallway import FormationHallwayEnv, target_formation_positions
 
 
@@ -88,3 +88,33 @@ def test_teleop_release():
     env.set_teleop(0, 1, False)
     assert env.teleop_mask[0, 1] == 0.0
     assert env.teleop_vels[0, 1].abs().sum().item() == 0.0
+
+
+def test_teleop_action_uses_separate_speed_limit():
+    env = FormationHallwayEnv({"num_envs": 1})
+    env.vector_reset()
+    env.set_teleop(0, 0, True)
+    env.set_teleop_action(0, 0, np.array([TELEOP_MAX_V * 2.0, 0.0]))
+    assert env.teleop_vels[0, 0, 0].item() == pytest.approx(TELEOP_MAX_V)
+    assert env.teleop_vels[0, 0, 0].item() > MAX_V
+
+
+def test_formation_reward_is_weighted_for_two_active_robots():
+    env = FormationHallwayEnv({"num_envs": 1})
+    env.vector_reset()
+    env.ps[0] = torch.tensor(
+        [[-0.30, 0.0], [0.30, 0.0], [0.0, 0.5], [0.0, -0.5]],
+        dtype=torch.float32,
+    )
+    env.set_teleop(0, 2, True)
+    env.set_teleop(0, 3, True)
+
+    penalty, err = env._formation_reward(0, env.ps[0])
+    # Active slots for scale=0.35 are at x=-0.175 and x=+0.175, so both
+    # active robots are 12.5 cm from the assigned line slots.
+    assert err == pytest.approx(0.125, abs=1e-5)
+    expected = -2.0 * 2.25 * 0.125
+    assert penalty[0].item() == pytest.approx(expected, abs=1e-5)
+    assert penalty[1].item() == pytest.approx(expected, abs=1e-5)
+    assert penalty[2].item() == 0.0
+    assert penalty[3].item() == 0.0

@@ -31,6 +31,8 @@ GOAL_Y = 5.0
 MAX_V = 1.0
 MAX_A = 2.0
 MIN_A = -2.0
+TELEOP_MAX_V = 2.5
+TELEOP_MAX_A = 5.0
 
 AGENT_RADIUS = 0.08
 
@@ -46,6 +48,9 @@ REWARD_COEFFS = {
     "k_coll": 5.0,
     "k_wall": 1.0,
     "k_goal": 20.0,
+    "k_form_by_active": {4: 1.0, 3: 1.5, 2: 2.25, 1: 0.0},
+    "k_center_by_active": {4: 0.25, 3: 0.5, 2: 0.75, 1: 0.25},
+    "k_centroid_fwd_by_active": {4: 2.0, 3: 3.0, 2: 4.0, 1: 2.0},
     "stall_window": 20,
     "stall_eps": 0.02,
 }
