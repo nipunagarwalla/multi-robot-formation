@@ -28,6 +28,7 @@ if __package__ in (None, ""):
 
 from checkpoint import load_checkpoint
 from contract import MAX_AGENTS
+from device_utils import pick_device
 from env_hallway import FormationHallwayEnv
 from metrics import EpisodeAccumulator
 from model import Agent
@@ -59,6 +60,8 @@ def main():
     ap.add_argument("--teleop", action="store_true",
                     help="apply RandomTeleop disturbance during eval")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", type=str, default="auto",
+                    help="auto | cpu | cuda | mps")
     ap.add_argument("--out", default=None,
                     help="path for eval.json (defaults to alongside the weights)")
     args = ap.parse_args()
@@ -69,13 +72,14 @@ def main():
     render = args.render and not args.no_render
     if not render:
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-    device = torch.device("cpu")
+    device = pick_device(args.device)
+    print(f"[device] using {device}")
 
     env = FormationHallwayEnv(
         {
             "num_envs": args.num_envs,
             "max_time_steps": args.max_steps,
-            "device": "cpu",
+            "device": str(device),
             "render": False,
         }
     )
