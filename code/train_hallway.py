@@ -29,6 +29,7 @@ if __package__ in (None, ""):
 
 from checkpoint import load_checkpoint, save_checkpoint
 from contract import REWARD_COEFFS
+from device_utils import pick_device
 from env_hallway import FormationHallwayEnv
 from metrics import EpisodeAccumulator, RunLogger
 from model import Agent
@@ -85,6 +86,12 @@ def main():
     )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="auto | cpu | cuda | mps. 'auto' picks cuda > mps > cpu.",
+    )
+    ap.add_argument(
         "--resume",
         type=str,
         default=None,
@@ -100,7 +107,9 @@ def main():
     torch.manual_seed(args.seed)
 
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-    device = torch.device("cpu")
+    device = pick_device(args.device)
+    config["env_config"]["device"] = str(device)
+    print(f"[device] using {device}")
 
     env = FormationHallwayEnv(config["env_config"])
     agent = Agent(env, config).to(device)
