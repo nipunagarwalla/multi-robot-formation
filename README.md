@@ -159,13 +159,20 @@ For a real training run, scale up:
 
 ```bash
 .venv/bin/python code/train_hallway.py \
-    --iterations 5000 --num-envs 16 --max-steps 400 \
-    --checkpoint-every 50 --tag hallway-v1
+    --resume runs/20260503_195621_hallway-v1/weights/latest.pt \
+    --iterations 1500 --num-envs 16 --max-steps 500 \
+    --minibatch-steps 64 --checkpoint-every 50 \
+    --device auto --tag stable-432-v1 \
+    --init-regime-dist 0.02,0.38,0.38,0.22
 ```
 
-This typically takes 1–2 hrs on a single CPU at the default settings.
-Move to GPU by changing `device="cuda"` in `make_config` in
-`code/train_hallway.py` — the GNN and rollouts both transfer.
+For the current v3 policy work, prefer resuming from the strong
+`hallway-v1` checkpoint instead of starting from scratch. The model
+parameter shapes are checkpoint-compatible, and `hallway-v1` already
+has reliable 4-robot square and 3-robot triangle behavior; the v3
+training pass should specialize it for stable 3- and 2-active regimes.
+Use from-scratch training only when you intentionally want to validate
+the new reward stack without inherited behavior.
 
 ---
 
@@ -180,7 +187,10 @@ mirrors the existing `env_line.PassageEnv` interface (`vector_reset`,
 goal line at `y = +5` (along the long axis).
 
 **Action.** `Tuple(Box(low=-MAX_V, high=MAX_V, shape=(2,))) * MAX_AGENTS`
-— a 2D desired-velocity per robot.
+— a 2D desired-velocity per robot. Policy-controlled robots are clamped
+to `MAX_V = 1.0 m/s`; teleop override velocities use a separate
+`TELEOP_MAX_V = 2.5 m/s` and higher acceleration limit so a human can
+pull a robot cleanly away from the cluster.
 
 **Observation (`Dict`):**
 
@@ -215,13 +225,21 @@ robot `i`:
 |---|---|---|
 | Forward progress | `+ k_fwd * dy_i` | `5.0` |
 | Stall penalty | `- k_stall` if cluster centroid moved < `eps` over last `K` steps | `0.5`, `K = 20`, `eps = 0.02` |
-| Formation error | `- k_form * dist_to_assigned_slot` (Hungarian-matched per step) | `2.0` |
+| Formation error | `- k_form * active_count_multiplier * dist_to_assigned_slot` (Hungarian-matched per step) | `2.0 × {4:1.0, 3:1.5, 2:2.25}` |
+| Active centroid forward progress | `+ k_centroid_fwd_by_active[n] * dy_centroid` | `{4:2.0, 3:3.0, 2:4.0, 1:2.0}` |
+| Centerline tracking | `- k_center_by_active[n] * abs(active_centroid_x)` | `{4:0.25, 3:0.5, 2:0.75, 1:0.25}` |
 | Inter-robot collision | `- k_coll` if any pairwise dist < `2 * AGENT_RADIUS` | `5.0` |
 | Wall overshoot | `- k_wall * |overshoot_x|` | `1.0` |
 | Goal bonus | `+ k_goal` once cluster centroid passes `GOAL_Y` (one-shot) | `20.0` |
 
 Teleop'd robots get a per-step reward of 0; the trainer additionally
 masks their gradient contribution to zero.
+
+The v3 reward defaults deliberately prioritize one stable global policy
+for active counts 4, 3, and 2. The stronger 3/2 formation multipliers,
+active-centroid forward reward, and centerline penalty are meant to keep
+small clusters moving down the hallway instead of drifting toward a
+teleop'd robot.
 
 ---
 
@@ -232,6 +250,11 @@ env's `set_teleop(env_idx, robot_idx, active)` and
 `set_teleop_action(env_idx, robot_idx, vel)` interface.
 
 **`RandomTeleop`** — runs during training. Per env at each step:
+- at episode reset, sample an initial active count from
+  `init_regime_dist` and pre-hold the remaining robots under teleop.
+  The list is ordered by active count `[1, 2, 3, 4]`. For example,
+  `0.02,0.38,0.38,0.22` means 2% solo, 38% two-active line, 38%
+  three-active triangle, and 22% four-active square episodes at reset.
 - with prob `p_grab` (default 0.005): pick a random free robot, mark it
   teleop'd, sample a duration in `[40, 160]` steps, choose a left/right
   drift direction.
@@ -250,10 +273,12 @@ re-absorb returning ones.
 |---|---|
 | `1` / `2` / `3` / `4` | toggle teleop on robot 1..4 |
 | `W` / `A` / `S` / `D` | drive the most-recently selected robot |
+| `Z` / `X` | decrease / increase selected teleop speed |
 | `0` | release all teleop'd robots |
 | `ESC` | quit the demo |
 
-The selected robot moves at `drive_speed = MAX_V` in the keyed direction.
+The selected robot starts at `1.0 m/s`, changes in `0.25 m/s` steps,
+and is clamped to `[0.25, 2.5] m/s`.
 
 ---
 
@@ -267,11 +292,16 @@ input from 6 to 8 features by appending `teleop_mask` and `present_mask`.
 cfg["model"]["custom_model_config"]["use_masks"] = True
 ```
 
-Architecture is otherwise unchanged from baseline AFOR:
+Architecture is otherwise unchanged from baseline AFOR, with one v3
+message-passing option:
 
 - Permutation-invariant `GNNBranch` (encoder → message-passing → post)
   with shared parameters across robots, radius-graph at
   `comm_range = 2.0 m`.
+- `mask_teleop_edges=True` removes messages sourced from teleop robots,
+  while keeping active-active messages and active self-edges. Teleop
+  robots remain physically present in the env for collision avoidance,
+  but the GNN no longer treats them as formation teammates.
 - Beta-distribution policy head (alpha/beta per action dim, squashed to
   `[-MAX_V, MAX_V]`).
 - Per-robot value head.
@@ -294,13 +324,20 @@ python code/train_hallway.py [flags]
 | `--tag` | `hallway-v0` | suffix on the run directory |
 | `--num-envs` | 8 | parallel rollout envs |
 | `--max-steps` | 400 | timesteps per rollout |
+| `--minibatch-steps` | 64 | PPO minibatch size in rollout timesteps; actual batch is `minibatch_steps × num_envs` |
 | `--checkpoint-every` | 20 | save checkpoint every N iters (last iter always saved) |
 | `--no-teleop` | off | disable `RandomTeleop` (debug only) |
 | `--seed` | 0 | seeds random / numpy / torch |
+| `--device` | `auto` | chooses `cuda > mps > cpu`, or force `cpu`, `cuda`, or `mps` |
 | `--resume` | none | path to a `.pt` checkpoint to resume from (continues iteration numbering, restores Adam moments) |
+| `--p-grab` | 0.005 | override random teleop grab probability |
+| `--p-release` | 0.01 | override random teleop release probability |
+| `--teleop-drift-speed` | 0.6 | override synthetic lateral teleop speed |
+| `--max-concurrent-grabs` | 3 | max teleop'd robots per env, leaving at least one active robot |
+| `--init-regime-dist` | `0.05,0.35,0.35,0.25` | reset-time probabilities for active counts `[1,2,3,4]` |
 
 PPO hyperparameters (gamma 0.995, lambda 0.95, clip 0.2, lr 5e-5,
-4 SGD epochs, value-clip 1.0, max grad norm 0.5, entropy coeff 0.001)
+8 SGD epochs, value-clip 1.0, max grad norm 0.5, entropy coeff 0.001)
 live in `make_config()` at the top of `train_hallway.py`.
 
 Per-iteration print:
@@ -313,6 +350,11 @@ are the source of truth for analysis — the print is just a convenience.
 **Loss masking.** The PPO objective multiplies per-robot pg, value, and
 entropy losses by `(1 - teleop_mask)` and renormalises by the sum of the
 mask, so gradients flow only through policy-controlled robots.
+
+**Fast path.** The trainer uses tensor observations/actions and flattened
+`(time, env)` PPO minibatches to avoid Python list conversion and
+one-timestep-at-a-time PPO updates. Increase `--minibatch-steps` if you
+want fewer, larger optimizer batches; decrease it if memory gets tight.
 
 ### Resuming a run
 
@@ -363,6 +405,7 @@ python code/eval_hallway.py --weights runs/<ts>/weights/latest.pt [flags]
 | `--render` | off | open a pygame window and step at real-time |
 | `--no-render` | on | force headless |
 | `--teleop` | off | apply `RandomTeleop` during eval (robustness test) |
+| `--fixed-active-count` | none | hold inactive robots under zero-velocity teleop to evaluate exactly N active robots |
 | `--out` | `<run>/eval.json` | output path |
 
 Writes `<run>/eval.json` with a top-level summary plus a `records[]`
@@ -380,6 +423,14 @@ list, one entry per episode:
   "mean_formation_error": 0.157,
   "records": [ { ... per-episode record ... }, ... ]
 }
+```
+
+For v3 policy checks, run fixed-regime evals separately:
+
+```bash
+.venv/bin/python code/eval_hallway.py --weights runs/<run>/weights/latest.pt --episodes 50 --fixed-active-count 4
+.venv/bin/python code/eval_hallway.py --weights runs/<run>/weights/latest.pt --episodes 50 --fixed-active-count 3
+.venv/bin/python code/eval_hallway.py --weights runs/<run>/weights/latest.pt --episodes 50 --fixed-active-count 2
 ```
 
 ---
@@ -477,7 +528,10 @@ If `matplotlib` is installed, also writes
 - shape correctness for `target_formation_positions(n)` for `n ∈ {1,2,3,4}`
 - centroid at origin, equilateral triangle, square sides, line horizontal
 - env step shapes
-- teleop override + release round-trip
+- teleop override + release round-trip, including separate teleop speed clamp
+
+Additional tests cover keyboard teleop speed controls, fixed-active-count
+eval setup, GNN teleop-edge masking, and the tensorized training fast path.
 
 `tests/fake_env.py` is a ~80-line stub satisfying the env contract,
 used both inside the formal tests and by `code/teleop.py --demo` so
@@ -504,15 +558,14 @@ to swap formation imports between `env_line` / `env_pentagon` / `env_wedge`.
 Deliberately not in v1 — see `plan.md` Section 8:
 
 - No tensorboard / wandb (CSV/JSONL is intentional).
-- No curriculum over the teleop probability — fixed `p_grab`.
+- No automatic curriculum scheduler over teleop probability; use the CLI
+  flags above to run manual ablations.
 - No formation rotation to arbitrary headings — long axis aligned to `+y`.
 - No multi-policy ensemble per cluster size — one shared policy.
 - No obstacle generalisation — the hallway is empty.
-- The model is CPU by default. GPU works (change `device` in
-  `make_config`) but isn't part of the verified path.
-- I have not trained a converged policy — only verified the pipeline
-  learns over a 10-iteration smoke run (mean reward `-2.77 → -0.21`,
-  KL ~0.003, no NaNs). Real performance needs hours of training.
+- The v3 reward/model changes are implemented and smoke-tested, but the
+  resulting stable 4/3/2 policy still needs a real resumed training run
+  and fixed-active-count evaluation.
 
 ---
 
