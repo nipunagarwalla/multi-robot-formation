@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import pygame
+from types import SimpleNamespace
 
-from teleop import RandomTeleop
+from teleop import KeyboardTeleop, RandomTeleop
 from fake_env import FakeHallwayEnv
 
 
@@ -113,3 +115,25 @@ def test_invalid_init_regime_dist_raises():
         RandomTeleop(env, init_regime_dist=[0.5, 0.5])  # wrong length
     with pytest.raises(ValueError):
         RandomTeleop(env, init_regime_dist=[0.0, 0.0, 0.0, 0.0])  # all zero
+
+
+def _key_event(key: int, unicode: str = "", event_type: int = pygame.KEYDOWN):
+    return SimpleNamespace(type=event_type, key=key, unicode=unicode)
+
+
+def test_keyboard_teleop_speed_adjustment_clamps():
+    env = FakeHallwayEnv(num_envs=1)
+    env.vector_reset()
+    kt = KeyboardTeleop(env, drive_speed=1.0)
+
+    kt.handle_event(_key_event(pygame.K_x, "x"))
+    kt.handle_event(_key_event(pygame.K_x, "x"))
+    assert kt.drive_speed == pytest.approx(1.5)
+
+    for _ in range(20):
+        kt.handle_event(_key_event(pygame.K_z, "z"))
+    assert kt.drive_speed == pytest.approx(kt.min_drive_speed)
+
+    for _ in range(20):
+        kt.handle_event(_key_event(pygame.K_x, "x"))
+    assert kt.drive_speed == pytest.approx(kt.max_drive_speed)

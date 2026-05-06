@@ -82,7 +82,7 @@ def main():
     total_r = 0.0
     step = 0
     running = True
-    print("[demo] keys: 1-4 toggle teleop · WASD drive · 0 release · ESC quit")
+    print("[demo] keys: 1-4 toggle teleop · WASD drive · Z/X speed · 0 release · ESC quit")
 
     while running:
         for ev in pygame.event.get():
@@ -106,7 +106,13 @@ def main():
         total_r += float(r[0])
         step += 1
 
-        renderer.render(env, env_idx=0, episode_step=step, total_reward=total_r)
+        renderer.render(
+            env,
+            env_idx=0,
+            episode_step=step,
+            total_reward=total_r,
+            teleop_speed=teleop.drive_speed,
+        )
         clock.tick(int(1 / env.cfg["dt"]))
 
         if done[0]:

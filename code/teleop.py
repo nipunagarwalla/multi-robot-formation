@@ -192,8 +192,13 @@ class KeyboardTeleop:
     Keys:
       1 / 2 / 3 / 4  toggle teleop on robot (1-indexed)
       W / A / S / D  drive the most-recently-selected teleop robot
+      Z / X          decrease / increase teleop drive speed
       0              release all teleop robots
     """
+
+    SPEED_STEP = 0.25
+    MIN_DRIVE_SPEED = 0.25
+    MAX_DRIVE_SPEED = 2.5
 
     DRIVE_KEYS = {
         ord("w"): np.array([0.0, 1.0]),
@@ -202,13 +207,33 @@ class KeyboardTeleop:
         ord("d"): np.array([1.0, 0.0]),
     }
 
-    def __init__(self, env, env_idx: int = 0, drive_speed: float = MAX_V):
+    def __init__(
+        self,
+        env,
+        env_idx: int = 0,
+        drive_speed: float = MAX_V,
+        min_drive_speed: float = MIN_DRIVE_SPEED,
+        max_drive_speed: float = MAX_DRIVE_SPEED,
+        speed_step: float = SPEED_STEP,
+    ):
         self.env = env
         self.env_idx = env_idx
         self.n_agents = env.cfg["n_agents"]
-        self.drive_speed = drive_speed
+        self.min_drive_speed = min_drive_speed
+        self.max_drive_speed = max_drive_speed
+        self.speed_step = speed_step
+        self.drive_speed = float(np.clip(drive_speed, min_drive_speed, max_drive_speed))
         self.selected = None  # last-toggled-on robot
         self.pressed = set()
+
+    def _adjust_speed(self, delta: float):
+        self.drive_speed = float(
+            np.clip(
+                self.drive_speed + delta,
+                self.min_drive_speed,
+                self.max_drive_speed,
+            )
+        )
 
     def _toggle(self, robot: int):
         active_now = float(self.env.teleop_mask[self.env_idx, robot]) > 0.5
@@ -230,6 +255,10 @@ class KeyboardTeleop:
                 for r in range(self.n_agents):
                     self.env.set_teleop(self.env_idx, r, False)
                 self.selected = None
+            elif event.key == pygame.K_x:
+                self._adjust_speed(self.speed_step)
+            elif event.key == pygame.K_z:
+                self._adjust_speed(-self.speed_step)
             elif event.key in self.DRIVE_KEYS:
                 self.pressed.add(event.key)
         elif event.type == pygame.KEYUP and event.key in self.DRIVE_KEYS:

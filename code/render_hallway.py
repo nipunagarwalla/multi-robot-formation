@@ -224,20 +224,33 @@ class HallwayRenderer:
                 idx = self.font_label.render(str(i + 1), True, BLACK)
                 surf.blit(idx, (sx + r_px + 4, sy - 10))
 
-    def _draw_hud(self, surf, active_count: int, episode_step: int, total_reward: float):
+    def _draw_hud(
+        self,
+        surf,
+        active_count: int,
+        episode_step: int,
+        total_reward: float,
+        teleop_speed: Optional[float] = None,
+    ):
         if self.font_hud is None:
             return
         # left margin panel — anchored to the dark frame, never on the floor
         panel_x = max(12, self.hall_left_px - 240)
+        speed_line = (
+            f"teleop speed = {teleop_speed:.2f} m/s"
+            if teleop_speed is not None
+            else ""
+        )
         lines = [
             ("FormationHallway", HUD),
             (f"active = {active_count}", HUD),
             (f"step   = {episode_step}", HUD_DIM),
             (f"reward = {total_reward:+.2f}", HUD_DIM),
+            (speed_line, HUD_DIM),
             ("", HUD_DIM),
             ("1/2/3/4 toggle teleop", HUD_DIM),
-            ("WASD drive  ·  0 release", HUD_DIM),
-            ("ESC quit", HUD_DIM),
+            ("WASD drive  Z/X speed", HUD_DIM),
+            ("0 release  ESC quit", HUD_DIM),
         ]
         y = self.hall_top_px
         for text, color in lines:
@@ -253,6 +266,7 @@ class HallwayRenderer:
         episode_step: int = 0,
         total_reward: float = 0.0,
         formation_scale: float = FORMATION_SCALE,
+        teleop_speed: Optional[float] = None,
     ):
         if self.surface is None:
             self.init()
@@ -267,7 +281,8 @@ class HallwayRenderer:
                                      scale=formation_scale)
         self._draw_robots(self.surface, ps, teleop)
         self._draw_hud(self.surface, active_count=len(active_idx),
-                       episode_step=episode_step, total_reward=total_reward)
+                       episode_step=episode_step, total_reward=total_reward,
+                       teleop_speed=teleop_speed)
         pygame.display.flip()
 
     def close(self):
