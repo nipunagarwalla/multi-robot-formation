@@ -247,6 +247,22 @@ class FormationHallwayEnv(gym.Env):
             "time": [[t]] * n,
         }
 
+    def get_obs_tensor(self):
+        """Return batched tensor observations without Python list conversion."""
+        n = self.cfg["n_agents"]
+        t = (
+            self.timesteps.to(dtype=torch.float32).view(-1, 1, 1)
+            * float(self.cfg["dt"])
+        )
+        return {
+            "pos": self.ps.clone(),
+            "vel": self.measured_vs.clone(),
+            "goal": self.goal_ps.clone(),
+            "teleop_mask": self.teleop_mask.clone(),
+            "present_mask": self.present_mask.clone(),
+            "time": t.expand(-1, n, 1).clone(),
+        }
+
     # --- reward components ----------------------------------------------
     def _formation_reward(self, env_idx: int, ps: torch.Tensor):
         """Per-robot formation penalty for env_idx.
@@ -287,13 +303,16 @@ class FormationHallwayEnv(gym.Env):
         return 0.0
 
     # --- step -----------------------------------------------------------
-    def vector_step(self, actions):
+    def vector_step(self, actions, return_tensor_obs: bool = False):
         cfg = self.cfg
         n = cfg["n_agents"]
         nE = cfg["num_envs"]
         coeffs = cfg["reward_coeffs"]
 
-        actions_t = torch.as_tensor(np.asarray(actions), dtype=torch.float32, device=self.device)
+        if torch.is_tensor(actions):
+            actions_t = actions.to(dtype=torch.float32, device=self.device)
+        else:
+            actions_t = torch.as_tensor(np.asarray(actions), dtype=torch.float32, device=self.device)
         # Override teleop slots with stored teleop velocities
         mask3 = self.teleop_mask.unsqueeze(-1)  # (nE, n, 1)
         actions_t = actions_t * (1.0 - mask3) + self.teleop_vels * mask3
@@ -384,7 +403,7 @@ class FormationHallwayEnv(gym.Env):
         self.timesteps += 1
         timeout = self.timesteps >= cfg["max_time_steps"]
         dones = (timeout | self.goal_reached).tolist()
-        obs = [self.get_obs(i) for i in range(nE)]
+        obs = self.get_obs_tensor() if return_tensor_obs else [self.get_obs(i) for i in range(nE)]
         infos = []
         for e in range(nE):
             active_e = active[e].bool()

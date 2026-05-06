@@ -155,7 +155,7 @@ def main():
             action, _, _, _ = agent.get_action_and_value(x)
         if teleop is not None:
             teleop.step()
-        obs, _r, done, infos = env.vector_step(action.cpu().numpy())
+        obs, _r, done, infos = env.vector_step(action)
         for e in range(env.cfg["num_envs"]):
             accs[e].update(
                 per_agent_rewards=[infos[e]["rewards"][k] for k in range(MAX_AGENTS)],

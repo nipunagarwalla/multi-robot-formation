@@ -103,7 +103,7 @@ def main():
             x = agent.format_input(obs, device)
             action, _, _, _ = agent.get_action_and_value(x)
 
-        obs, r, done, info = env.vector_step(action.cpu().numpy())
+        obs, r, done, info = env.vector_step(action)
         total_r += float(r[0])
         step += 1
 

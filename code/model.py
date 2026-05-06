@@ -189,6 +189,15 @@ class Agent(nn.Module):
         self.model = model
 
     def format_input(self, x, device):
+        if isinstance(x, dict):
+            out = {}
+            for key, value in x.items():
+                if torch.is_tensor(value):
+                    out[key] = value.to(device=device, dtype=torch.float32)
+                else:
+                    out[key] = torch.tensor(value, dtype=torch.float32, device=device)
+            return out
+
         # format from list-of-dict (per env) to batched tensor dict
         obs = x
 

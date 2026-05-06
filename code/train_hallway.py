@@ -88,6 +88,7 @@ def main():
     ap.add_argument("--tag", type=str, default="hallway-v0")
     ap.add_argument("--num-envs", type=int, default=8)
     ap.add_argument("--max-steps", type=int, default=400)
+    ap.add_argument("--minibatch-steps", type=int, default=64)
     ap.add_argument("--checkpoint-every", type=int, default=20)
     ap.add_argument(
         "--no-teleop",
@@ -223,16 +224,17 @@ def main():
     values_buf = torch.zeros((T, nE, nA), device=device)
     teleop_buf = torch.zeros((T, nE, nA), device=device)
 
-    next_obs = env.vector_reset()
+    env.vector_reset()
     if teleop is not None:
         for e in range(nE):
             teleop.reset_env(e)
+    next_obs = env.get_obs_tensor()
     next_done = torch.zeros(nE, device=device)
     accs = [EpisodeAccumulator(nA) for _ in range(nE)]
 
     global_step = 0
     start_time = time.time()
-    obs_per_step: list = []
+    obs_per_step: list[dict[str, torch.Tensor]] = []
 
     iter_lo = start_iteration + 1
     iter_hi = start_iteration + args.iterations + 1
@@ -248,11 +250,9 @@ def main():
         for step in range(T):
             global_step += nE
             x = agent.format_input(next_obs, device)
-            obs_per_step.append(x)
+            obs_per_step.append({k: v.detach().clone() for k, v in x.items()})
             dones_buf[step] = next_done
-            teleop_buf[step] = torch.as_tensor(
-                [o["teleop_mask"] for o in next_obs], dtype=torch.float32, device=device
-            )
+            teleop_buf[step] = x["teleop_mask"]
 
             with torch.no_grad():
                 action, logprob, _, value = agent.get_action_and_value(x)
@@ -263,7 +263,9 @@ def main():
             if teleop is not None:
                 teleop.step()
 
-            next_obs, _r_summed, done, infos = env.vector_step(action.cpu().numpy())
+            next_obs, _r_summed, done, infos = env.vector_step(
+                action, return_tensor_obs=True
+            )
 
             per_agent = torch.zeros(nE, nA, device=device)
             for e in range(nE):
@@ -272,7 +274,7 @@ def main():
                 accs[e].update(
                     per_agent_rewards=per_agent[e].tolist(),
                     active_count=int(infos[e]["active_count"]),
-                    teleop_mask=next_obs[e]["teleop_mask"],
+                    teleop_mask=next_obs["teleop_mask"][e].detach().cpu().tolist(),
                     formation_err=infos[e]["formation_error"],
                     fwd_velocity=float(infos[e]["fwd_velocity"]),
                     stalled=bool(infos[e]["stalled"]),
@@ -301,6 +303,8 @@ def main():
                     env.reset_at(e)
                     if teleop is not None:
                         teleop.reset_env(e)
+            if any(done):
+                next_obs = env.get_obs_tensor()
 
         # --- advantages ------------------------------------------------
         with torch.no_grad():
@@ -328,16 +332,39 @@ def main():
                 )
             returns_buf = advantages + values_buf
 
-        # --- PPO update over the time-axis ----------------------------
-        b_inds = np.arange(T)
+        # --- PPO update over flattened (time, env) minibatches --------
+        obs_buf = {
+            k: torch.stack([obs[k] for obs in obs_per_step], dim=0)
+            for k in obs_per_step[0].keys()
+        }
+        flat_obs = {
+            k: v.reshape(T * nE, *v.shape[2:])
+            for k, v in obs_buf.items()
+        }
+        flat_actions = actions_buf.reshape(T * nE, nA, 2)
+        flat_logprobs = logprobs_buf.reshape(T * nE, nA)
+        flat_advantages = advantages.reshape(T * nE, nA)
+        flat_returns = returns_buf.reshape(T * nE, nA)
+        flat_values = values_buf.reshape(T * nE, nA)
+        flat_teleop = teleop_buf.reshape(T * nE, nA)
+
+        b_inds = np.arange(T * nE)
+        minibatch_size = max(1, min(T * nE, args.minibatch_steps * nE))
         last_pg = last_vl = last_ent = last_kl = last_clip = last_grad = 0.0
         for epoch in tqdm(range(config["num_sgd_iter"]), leave=False):
             np.random.shuffle(b_inds)
-            for mb_t in b_inds:
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
-                    obs_per_step[mb_t], actions_buf[mb_t]
+            for start in range(0, len(b_inds), minibatch_size):
+                mb_inds = torch.as_tensor(
+                    b_inds[start : start + minibatch_size],
+                    dtype=torch.long,
+                    device=device,
                 )
-                logratio = newlogprob - logprobs_buf[mb_t]
+                mb_obs = {k: v.index_select(0, mb_inds) for k, v in flat_obs.items()}
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                    mb_obs, flat_actions.index_select(0, mb_inds)
+                )
+                old_logprob = flat_logprobs.index_select(0, mb_inds)
+                logratio = newlogprob - old_logprob
                 ratio = logratio.exp()
 
                 with torch.no_grad():
@@ -349,12 +376,14 @@ def main():
                         .item()
                     )
 
-                mb_adv = advantages[mb_t]
+                mb_adv = flat_advantages.index_select(0, mb_inds)
+                active = 1.0 - flat_teleop.index_select(0, mb_inds)
                 if config["norm_adv"]:
-                    mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+                    active_adv = mb_adv[active > 0.5]
+                    if active_adv.numel() > 1:
+                        mb_adv = (mb_adv - active_adv.mean()) / (active_adv.std() + 1e-8)
 
                 # Active-mask: only policy-controlled robots contribute to the loss
-                active = 1.0 - teleop_buf[mb_t]  # (nE, nA)
                 norm = active.sum().clamp(min=1.0)
 
                 pg_loss1 = -mb_adv * ratio
@@ -363,20 +392,22 @@ def main():
                 )
                 pg_loss = (torch.max(pg_loss1, pg_loss2) * active).sum() / norm
 
+                mb_returns = flat_returns.index_select(0, mb_inds)
                 if config["clip_vloss"]:
-                    v_unclipped = (newvalue - returns_buf[mb_t]) ** 2
-                    v_clipped = values_buf[mb_t] + torch.clamp(
-                        newvalue - values_buf[mb_t],
+                    mb_values = flat_values.index_select(0, mb_inds)
+                    v_unclipped = (newvalue - mb_returns) ** 2
+                    v_clipped = mb_values + torch.clamp(
+                        newvalue - mb_values,
                         -config["vf_clip_param"],
                         config["vf_clip_param"],
                     )
-                    v_clipped_loss = (v_clipped - returns_buf[mb_t]) ** 2
+                    v_clipped_loss = (v_clipped - mb_returns) ** 2
                     v_max = torch.max(v_unclipped, v_clipped_loss)
                     v_loss = 0.5 * (v_max * active).sum() / norm
                 else:
                     v_loss = (
                         0.5
-                        * (((newvalue - returns_buf[mb_t]) ** 2) * active).sum()
+                        * (((newvalue - mb_returns) ** 2) * active).sum()
                         / norm
                     )
 
@@ -403,8 +434,8 @@ def main():
                     grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm
                 )
 
-        # Active-only mean reward (teleop'd slots are zero by construction)
-        mean_reward_iter = float(rewards_buf.sum().item()) / max(global_step, 1)
+        # Active-only per-iteration mean reward (teleop'd slots are zero)
+        mean_reward_iter = float(rewards_buf.sum().item()) / max(T * nE, 1)
         mean_ep_len = float(np.mean(ep_lengths)) if ep_lengths else float("nan")
         success_rate = (
             float(np.mean(ep_reached_goal)) if ep_reached_goal else float("nan")
