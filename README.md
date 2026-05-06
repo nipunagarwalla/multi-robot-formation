@@ -163,7 +163,8 @@ For a real training run, scale up:
     --iterations 1500 --num-envs 16 --max-steps 500 \
     --minibatch-steps 64 --checkpoint-every 50 \
     --device auto --tag stable-432-v1 \
-    --init-regime-dist 0.02,0.38,0.38,0.22
+    --init-regime-dist 0.02,0.38,0.38,0.22 \
+    --save-best-on-eval --eval-every 50 --eval-episodes 10
 ```
 
 For the current v3 policy work, prefer resuming from the strong
@@ -173,6 +174,12 @@ has reliable 4-robot square and 3-robot triangle behavior; the v3
 training pass should specialize it for stable 3- and 2-active regimes.
 Use from-scratch training only when you intentionally want to validate
 the new reward stack without inherited behavior.
+
+`--save-best-on-eval` is recommended for real runs. PPO can wobble, so
+the last checkpoint is not necessarily the best one. The trainer scores
+fixed 4-, 3-, and 2-active eval rollouts and updates
+`runs/<run>/weights/best.pt` only when the worst-regime-first score
+improves.
 
 ---
 
@@ -335,6 +342,11 @@ python code/train_hallway.py [flags]
 | `--teleop-drift-speed` | 0.6 | override synthetic lateral teleop speed |
 | `--max-concurrent-grabs` | 3 | max teleop'd robots per env, leaving at least one active robot |
 | `--init-regime-dist` | `0.05,0.35,0.35,0.25` | reset-time probabilities for active counts `[1,2,3,4]` |
+| `--save-best-on-eval` | off | periodically run fixed-regime eval and update `weights/best.pt` when score improves |
+| `--eval-every` | 50 | eval cadence in PPO iterations when `--save-best-on-eval` is set |
+| `--eval-episodes` | 5 | episodes per active count for periodic best-checkpoint eval |
+| `--eval-max-steps` | `--max-steps` | max steps per eval episode |
+| `--eval-active-counts` | `4,3,2` | active-count regimes included in the best-checkpoint score |
 
 PPO hyperparameters (gamma 0.995, lambda 0.95, clip 0.2, lr 5e-5,
 8 SGD epochs, value-clip 1.0, max grad norm 0.5, entropy coeff 0.001)
@@ -355,6 +367,13 @@ mask, so gradients flow only through policy-controlled robots.
 `(time, env)` PPO minibatches to avoid Python list conversion and
 one-timestep-at-a-time PPO updates. Increase `--minibatch-steps` if you
 want fewer, larger optimizer batches; decrease it if memory gets tight.
+
+**Best checkpoint selection.** With `--save-best-on-eval`, training writes
+`evals.jsonl` with one periodic eval record per eval iteration and
+`best_eval.json` with the best record so far. The score is intentionally
+worst-regime-first across active counts 4, 3, and 2, so a policy that is
+excellent for square but poor for 2-robot line will not replace
+`weights/best.pt`.
 
 ### Resuming a run
 
@@ -462,10 +481,13 @@ runs/20260503_161721_e2e/
 ├── config.json        # one-shot snapshot
 ├── iterations.csv     # one row per PPO iteration  <- primary comparison artefact
 ├── episodes.jsonl     # one JSON object per finished episode
+├── evals.jsonl        # appears when --save-best-on-eval is used
+├── best_eval.json     # best periodic eval record so far
 └── weights/
     ├── weights_epoch1.pt
     ├── ...
-    └── latest.pt      # symlink
+    ├── latest.pt      # symlink
+    └── best.pt        # symlink, only with --save-best-on-eval
 ```
 
 **`config.json`** captures everything needed to reproduce the run:

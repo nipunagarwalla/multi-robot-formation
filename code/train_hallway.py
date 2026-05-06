@@ -43,6 +43,126 @@ def _parse_float_list(raw: str) -> list[float]:
     return vals
 
 
+def _parse_int_list(raw: str) -> list[int]:
+    vals = [int(x.strip()) for x in raw.split(",") if x.strip()]
+    if not vals:
+        raise argparse.ArgumentTypeError("expected comma-separated ints")
+    return vals
+
+
+def _apply_fixed_active_count(env: FormationHallwayEnv, env_idx: int, active_count: int):
+    for r in range(env.cfg["n_agents"]):
+        is_teleop = r >= active_count
+        env.set_teleop(env_idx, r, is_teleop)
+        if is_teleop:
+            env.set_teleop_action(env_idx, r, np.zeros(2, dtype=np.float32))
+
+
+def _mean_or_zero(values: list[float]) -> float:
+    return float(np.mean(values)) if values else 0.0
+
+
+def _score_eval(per_active: dict[int, dict]) -> float:
+    """Worst-regime-first score for selecting a stable 4/3/2 checkpoint."""
+    if not per_active:
+        return float("-inf")
+    successes = [float(v["success_rate"]) for v in per_active.values()]
+    fwd = [float(v["mean_forward_velocity"]) for v in per_active.values()]
+    forms = [float(v["mean_formation_error"]) for v in per_active.values()]
+    collisions = [float(v["mean_collisions"]) for v in per_active.values()]
+    return float(
+        1000.0 * min(successes)
+        + 250.0 * float(np.mean(successes))
+        + 25.0 * float(np.mean(fwd))
+        - 50.0 * max(forms)
+        - 0.5 * float(np.mean(collisions))
+    )
+
+
+def _run_fixed_regime_eval(
+    agent: Agent,
+    config: dict,
+    device: torch.device,
+    active_counts: list[int],
+    episodes: int,
+    max_steps: int,
+    seed: int,
+) -> dict:
+    env_cfg = dict(config["env_config"])
+    env_cfg.update({"num_envs": 1, "max_time_steps": max_steps, "render": False})
+    eval_env = FormationHallwayEnv(env_cfg)
+    previous_training_state = agent.training
+    agent.eval()
+
+    per_active: dict[int, dict] = {}
+    with torch.no_grad():
+        for active_count in active_counts:
+            records = []
+            obs = eval_env.vector_reset()
+            _apply_fixed_active_count(eval_env, 0, active_count)
+            obs = eval_env.get_obs_tensor()
+            acc = EpisodeAccumulator(eval_env.cfg["n_agents"])
+            eps_done = 0
+            while eps_done < episodes:
+                x = agent.format_input(obs, device)
+                action, _, _, _ = agent.get_action_and_value(x)
+                obs, _r, done, infos = eval_env.vector_step(action, return_tensor_obs=True)
+                info = infos[0]
+                acc.update(
+                    per_agent_rewards=[info["rewards"][k] for k in range(eval_env.cfg["n_agents"])],
+                    active_count=int(info["active_count"]),
+                    teleop_mask=obs["teleop_mask"][0].detach().cpu().tolist(),
+                    formation_err=info["formation_error"],
+                    fwd_velocity=float(info["fwd_velocity"]),
+                    stalled=bool(info["stalled"]),
+                    had_collision=bool(info["collided"]),
+                    had_wall_hit=bool(info["wall_hit"]),
+                )
+                if done[0]:
+                    records.append(
+                        acc.emit(
+                            iteration=0,
+                            env_id=0,
+                            reached_goal=bool(info["goal_reached"]),
+                        )
+                    )
+                    eps_done += 1
+                    acc.reset()
+                    eval_env.reset_at(0)
+                    _apply_fixed_active_count(eval_env, 0, active_count)
+                    obs = eval_env.get_obs_tensor()
+
+            per_active[active_count] = {
+                "episodes": len(records),
+                "success_rate": _mean_or_zero([float(r["reached_goal"]) for r in records]),
+                "mean_total_reward": _mean_or_zero([float(r["total_reward"]) for r in records]),
+                "mean_episode_length": _mean_or_zero([float(r["episode_length"]) for r in records]),
+                "mean_forward_velocity": _mean_or_zero(
+                    [float(r["forward_velocity_mean"]) for r in records]
+                ),
+                "mean_formation_error": _mean_or_zero(
+                    [float(r["formation_error_mean"]) for r in records]
+                ),
+                "mean_collisions": _mean_or_zero([float(r["num_collisions"]) for r in records]),
+            }
+
+    eval_env.close()
+    if previous_training_state:
+        agent.train()
+    else:
+        agent.eval()
+
+    score = _score_eval(per_active)
+    return {
+        "seed": seed,
+        "active_counts": active_counts,
+        "episodes_per_active_count": episodes,
+        "max_steps": max_steps,
+        "score": score,
+        "per_active": {str(k): v for k, v in per_active.items()},
+    }
+
+
 def make_config(num_envs: int, max_time_steps: int) -> dict:
     return {
         "seed": 0,
@@ -119,9 +239,43 @@ def main():
         default=None,
         help="comma-separated probabilities for active counts 1,2,3,4",
     )
+    ap.add_argument(
+        "--save-best-on-eval",
+        action="store_true",
+        help="periodically run fixed-regime eval and update weights/best.pt on improvement",
+    )
+    ap.add_argument(
+        "--eval-every",
+        type=int,
+        default=50,
+        help="eval cadence in training iterations when --save-best-on-eval is set",
+    )
+    ap.add_argument(
+        "--eval-episodes",
+        type=int,
+        default=5,
+        help="episodes per fixed active count for periodic best-checkpoint eval",
+    )
+    ap.add_argument(
+        "--eval-max-steps",
+        type=int,
+        default=None,
+        help="max steps for periodic eval; defaults to --max-steps",
+    )
+    ap.add_argument(
+        "--eval-active-counts",
+        type=_parse_int_list,
+        default=[4, 3, 2],
+        help="comma-separated active counts to score for best checkpoint selection",
+    )
     args = ap.parse_args()
 
     config = make_config(num_envs=args.num_envs, max_time_steps=args.max_steps)
+    if args.save_best_on_eval and args.eval_every <= 0:
+        raise ValueError("--eval-every must be positive when --save-best-on-eval is set")
+    bad_counts = [k for k in args.eval_active_counts if k < 1 or k > 4]
+    if bad_counts:
+        raise ValueError(f"--eval-active-counts values must be in [1,4], got {bad_counts}")
     if args.p_grab is not None:
         config["teleop"]["p_grab"] = args.p_grab
     if args.p_release is not None:
@@ -235,6 +389,8 @@ def main():
     global_step = 0
     start_time = time.time()
     obs_per_step: list[dict[str, torch.Tensor]] = []
+    best_eval_score = float("-inf")
+    best_eval_iteration = None
 
     iter_lo = start_iteration + 1
     iter_hi = start_iteration + args.iterations + 1
@@ -491,6 +647,46 @@ def main():
             ckpt = logger.checkpoint_path(iteration)
             save_checkpoint(ckpt, agent, optimizer, iteration)
             logger.update_latest_symlink(ckpt)
+
+        if args.save_best_on_eval and (
+            iteration % args.eval_every == 0 or iteration == iter_hi - 1
+        ):
+            eval_summary = _run_fixed_regime_eval(
+                agent=agent,
+                config=config,
+                device=device,
+                active_counts=args.eval_active_counts,
+                episodes=args.eval_episodes,
+                max_steps=args.eval_max_steps or args.max_steps,
+                seed=args.seed + iteration,
+            )
+            eval_summary["iter"] = iteration
+            eval_summary["best_so_far"] = False
+            ckpt = logger.checkpoint_path(iteration)
+            if not os.path.exists(ckpt):
+                save_checkpoint(ckpt, agent, optimizer, iteration)
+            score = float(eval_summary["score"])
+            if score > best_eval_score:
+                best_eval_score = score
+                best_eval_iteration = iteration
+                eval_summary["best_so_far"] = True
+                logger.update_best_symlink(ckpt)
+                logger.write_best_eval(eval_summary)
+            logger.log_eval(eval_summary)
+            per_active = eval_summary["per_active"]
+            regime_bits = []
+            for k in args.eval_active_counts:
+                row = per_active[str(k)]
+                regime_bits.append(
+                    f"{k}:succ={row['success_rate']*100:.0f}%"
+                    f",form={row['mean_formation_error']:.3f}"
+                    f",vy={row['mean_forward_velocity']:+.2f}"
+                )
+            print(
+                f"[eval] iter {iteration}  score={score:.2f}  "
+                f"best={best_eval_score:.2f}@{best_eval_iteration}  "
+                + "  ".join(regime_bits)
+            )
 
     logger.close()
     print(f"[done] last ckpt: {logger.checkpoint_path(iter_hi - 1)}")

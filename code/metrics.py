@@ -81,10 +81,13 @@ class RunLogger:
         os.makedirs(self.weights_dir, exist_ok=True)
         self.iter_path = os.path.join(self.dir, "iterations.csv")
         self.ep_path = os.path.join(self.dir, "episodes.jsonl")
+        self.eval_path = os.path.join(self.dir, "evals.jsonl")
+        self.best_eval_path = os.path.join(self.dir, "best_eval.json")
         self.cfg_path = os.path.join(self.dir, "config.json")
         self._iter_writer = None
         self._iter_fh = None
         self._ep_fh = None
+        self._eval_fh = None
         self._repo_root = repo_root or os.getcwd()
 
     # ---- one-shot config ----------------------------------------------
@@ -121,17 +124,34 @@ class RunLogger:
         self._ep_fh.write(json.dumps(payload, default=str) + "\n")
         self._ep_fh.flush()
 
+    # ---- periodic eval -------------------------------------------------
+    def log_eval(self, payload: Dict[str, Any]):
+        if self._eval_fh is None:
+            self._eval_fh = open(self.eval_path, "a")
+        self._eval_fh.write(json.dumps(payload, default=str) + "\n")
+        self._eval_fh.flush()
+
+    def write_best_eval(self, payload: Dict[str, Any]):
+        with open(self.best_eval_path, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+
     # ---- checkpoints --------------------------------------------------
     def checkpoint_path(self, iteration: int) -> str:
         return os.path.join(self.weights_dir, f"weights_epoch{iteration}.pt")
 
-    def update_latest_symlink(self, ckpt_path: str):
-        link = os.path.join(self.weights_dir, "latest.pt")
+    def _update_weight_symlink(self, name: str, ckpt_path: str):
+        link = os.path.join(self.weights_dir, name)
         if os.path.islink(link) or os.path.exists(link):
             os.remove(link)
         # Use relative target so the symlink survives a moved runs/ tree
         rel = os.path.relpath(ckpt_path, self.weights_dir)
         os.symlink(rel, link)
+
+    def update_latest_symlink(self, ckpt_path: str):
+        self._update_weight_symlink("latest.pt", ckpt_path)
+
+    def update_best_symlink(self, ckpt_path: str):
+        self._update_weight_symlink("best.pt", ckpt_path)
 
     def close(self):
         if self._iter_fh is not None:
@@ -141,6 +161,9 @@ class RunLogger:
         if self._ep_fh is not None:
             self._ep_fh.close()
             self._ep_fh = None
+        if self._eval_fh is not None:
+            self._eval_fh.close()
+            self._eval_fh = None
 
 
 class EpisodeAccumulator:
