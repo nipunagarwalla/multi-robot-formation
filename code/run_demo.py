@@ -62,7 +62,15 @@ def main():
     )
     agent = _build_agent(env, device)
     ckpt = load_checkpoint(args.weights, device)
-    agent.load_state_dict(ckpt["agent"])
+    # strict=False so older checkpoints (saved before comm_range was a buffer)
+    # still load — the buffer is deterministic from cfg["comm_range"].
+    missing, unexpected = agent.load_state_dict(ckpt["agent"], strict=False)
+    benign = {"model.comm_range"}
+    real_missing = [k for k in missing if k not in benign]
+    if real_missing or unexpected:
+        raise RuntimeError(
+            f"checkpoint mismatch  missing={real_missing}  unexpected={list(unexpected)}"
+        )
     agent.eval()
 
     renderer = HallwayRenderer()
