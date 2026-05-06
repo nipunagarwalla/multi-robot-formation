@@ -37,7 +37,7 @@ class GNNBranch(nn.Module):
         self.nns = self.generate_nn_instance(
             in_features, msg_features, out_features, activation
         )
-        self.gnn = ModGNNConv(self.nns["gnn"], aggr="add").jittable()
+        self.gnn = ModGNNConv(self.nns["gnn"], aggr="add")
 
     def generate_nn_instance(self, in_features, msg_features, out_features, activation):
         return torch.nn.ModuleDict(

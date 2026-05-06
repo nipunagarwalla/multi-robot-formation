@@ -31,10 +31,42 @@ $PYTHON_BIN code/eval_hallway.py \
   --device "$DEVICE"
 
 if [[ "$VISUALIZE" == "1" ]]; then
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+  $PYTHON_BIN code/eval_hallway.py \
+    --weights "$RUN_DIR/weights/latest.pt" \
+    --episodes "$VIS_EPISODES" \
+    --max-steps "$MAX_STEPS" \
+    --render \
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
   $PYTHON_BIN code/eval_hallway_viz.py \
     --weights "$RUN_DIR/weights/latest.pt" \
     --episodes "$VIS_EPISODES" \
     --max-steps "$MAX_STEPS" \
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
     --device "$DEVICE"
 fi
 
