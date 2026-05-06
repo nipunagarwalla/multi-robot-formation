@@ -119,7 +119,16 @@ def main():
     resume_meta = None
     if args.resume is not None:
         ckpt = load_checkpoint(args.resume, device)
-        agent.load_state_dict(ckpt["agent"])
+        # strict=False so checkpoints saved before comm_range was a buffer
+        # still load. The buffer is deterministic from cfg so it's safe to
+        # allowlist; everything else missing or unexpected still raises.
+        missing, unexpected = agent.load_state_dict(ckpt["agent"], strict=False)
+        benign = {"model.comm_range"}
+        real_missing = [k for k in missing if k not in benign]
+        if real_missing or unexpected:
+            raise RuntimeError(
+                f"checkpoint mismatch  missing={real_missing}  unexpected={list(unexpected)}"
+            )
         if ckpt["optimizer"] is not None:
             optimizer.load_state_dict(ckpt["optimizer"])
         start_iteration = int(ckpt["iteration"])
