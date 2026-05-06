@@ -34,7 +34,7 @@ from model import Agent
 from teleop import RandomTeleop
 
 
-def make_config(num_envs: int, max_time_steps: int) -> dict:
+def make_config(num_envs: int, max_time_steps: int, device: str) -> dict:
     return {
         "seed": 0,
         "clip_param": 0.2,
@@ -58,14 +58,19 @@ def make_config(num_envs: int, max_time_steps: int) -> dict:
         },
         "env_config": {
             "num_envs": num_envs,
-            "device": "cpu",
+            "device": device,
             "max_time_steps": max_time_steps,
             "render": False,
         },
         "teleop": {
-            "p_grab": 0.005,
+            "p_grab": 0.003,
+            "p_grab_final": 0.015,
             "p_release": 0.01,
             "drift_speed": 0.6,
+        },
+        "curriculum": {
+            "radius_start": 0.12,
+            "radius_end": 0.08,
         },
     }
 
@@ -80,21 +85,25 @@ def main():
     ap.add_argument("--no-teleop", action="store_true",
                     help="disable random-teleop disturbance (debug only)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--resume", type=str, default=None,
                     help="path to a .pt checkpoint to resume from "
                          "(continues iteration numbering, restores optimizer state)")
     args = ap.parse_args()
 
-    config = make_config(num_envs=args.num_envs, max_time_steps=args.max_steps)
+    config = make_config(num_envs=args.num_envs, max_time_steps=args.max_steps, device=args.device)
     config["seed"] = args.seed
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-    device = torch.device("cpu")
+    device = torch.device(args.device)
 
     env = FormationHallwayEnv(config["env_config"])
+    env.cfg["agent_radius_start"] = config["curriculum"]["radius_start"]
+    env.cfg["agent_radius_end"] = config["curriculum"]["radius_end"]
+    env.cfg["agent_radius_curriculum_steps"] = max(1, args.iterations)
     agent = Agent(env, config).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=config["lr"], eps=1e-5)
 
@@ -167,6 +176,12 @@ def main():
     iter_lo = start_iteration + 1
     iter_hi = start_iteration + args.iterations + 1
     for iteration in range(iter_lo, iter_hi):
+        env.set_curriculum_step(iteration - iter_lo)
+        if teleop is not None:
+            p0 = config["teleop"]["p_grab"]
+            p1 = config["teleop"]["p_grab_final"]
+            alpha = (iteration - iter_lo) / max(1, args.iterations - 1)
+            teleop.p_grab = p0 + (p1 - p0) * alpha
         obs_per_step = []
         ep_rewards: list = []
         ep_lengths: list = []
