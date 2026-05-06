@@ -3,9 +3,17 @@ from torch import nn
 import torch_geometric
 from torch_geometric.nn.conv import MessagePassing
 from torch import Tensor
-from torch_cluster import radius_graph
 
 import math
+import os
+import sys
+
+# device_utils.radius_graph_torch is the MPS/CUDA-friendly drop-in.
+# torch_cluster.radius_graph asserts x.is_cpu() so it cannot run elsewhere.
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from device_utils import radius_graph_torch as radius_graph
 
 
 class ModGNNConv(MessagePassing):
@@ -106,7 +114,8 @@ class Model(nn.Module):
             "sigmoid": nn.Sigmoid,
         }[cfg["activation"]]
 
-        self.comm_range = torch.Tensor([cfg["comm_range"]])
+        # buffer (not parameter) so .to(device) moves it with the model
+        self.register_buffer("comm_range", torch.tensor([cfg["comm_range"]], dtype=torch.float32))
 
         # Per-robot input features: [goal-pos (2), pos (2), pos+vel (2)] = 6 base
         # Optional appended bits: teleop_mask (1), present_mask (1) — gated by cfg
@@ -196,11 +205,23 @@ class Agent(nn.Module):
         entropys = []
         for idx, (agent_alpha, agent_beta, agent_action_space) in enumerate(zip(alpha, beta, self.action_space)):
             agent_probs = torch.distributions.Beta(concentration1=agent_alpha, concentration0=agent_beta)
-            agent_low = torch.tensor(agent_action_space.low).to(x.device)
-            agent_high = torch.tensor(agent_action_space.high).to(x.device)
+            # explicit float32: gym Box.low/high default to numpy float64 which MPS rejects
+            agent_low = torch.as_tensor(agent_action_space.low, dtype=torch.float32, device=x.device)
+            agent_high = torch.as_tensor(agent_action_space.high, dtype=torch.float32, device=x.device)
 
             if action is None:
-                agent_action = agent_probs.rsample().to(x.device)                   # reparameterization trick: has gradient
+                # Beta uses Dirichlet sampling under the hood and MPS lacks
+                # aten::_sample_dirichlet. Sample on CPU and bring back; this
+                # branch is only hit during rollout, which is wrapped in
+                # torch.no_grad(), so reparameterization gradient is unused.
+                if x.device.type == "mps":
+                    cpu_probs = torch.distributions.Beta(
+                        concentration1=agent_alpha.detach().cpu(),
+                        concentration0=agent_beta.detach().cpu(),
+                    )
+                    agent_action = cpu_probs.sample().to(x.device)
+                else:
+                    agent_action = agent_probs.rsample()                          # reparameterization trick: has gradient
             else:
                 agent_action = (action[:,idx,:] - agent_low) / (agent_high - agent_low)
             agent_logp = torch.sum(agent_probs.log_prob(agent_action), dim=-1)
