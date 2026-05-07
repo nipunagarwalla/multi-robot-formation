@@ -1,0 +1,135 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="hallway">
+
+    <!-- standard sun + ground -->
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <!-- physics: keep defaults; the velocity plugin sets velocities directly -->
+    <physics name="default_physics" default="true" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_update_rate>1000</real_time_update_rate>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- ===========================================================
+         Hallway is 2 m wide (x in [-1, +1]) and 12 m long (y in [-6, +6]).
+         Long axis is y so it matches FormationHallwayEnv exactly:
+            spawn line  y = -5 (blue)
+            goal  line  y = +5 (green)
+         All walls are static and 0.5 m tall.
+         =========================================================== -->
+
+    <!-- left wall at x = -1.0 -->
+    <model name="wall_left">
+      <static>true</static>
+      <pose>-1.025 0 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>0.05 12.0 0.5</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>0.05 12.0 0.5</size></box></geometry>
+          <material>
+            <ambient>0.15 0.15 0.18 1</ambient>
+            <diffuse>0.25 0.25 0.30 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- right wall at x = +1.0 -->
+    <model name="wall_right">
+      <static>true</static>
+      <pose>1.025 0 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>0.05 12.0 0.5</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>0.05 12.0 0.5</size></box></geometry>
+          <material>
+            <ambient>0.15 0.15 0.18 1</ambient>
+            <diffuse>0.25 0.25 0.30 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- back cap at y = -6.0 (behind spawn line). Soft Y-clip in pygame is at
+         +/- 6.0; physical caps prevent robots rolling out forever in Gazebo. -->
+    <model name="wall_back">
+      <static>true</static>
+      <pose>0 -6.025 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>2.1 0.05 0.5</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>2.1 0.05 0.5</size></box></geometry>
+          <material>
+            <ambient>0.15 0.15 0.18 1</ambient>
+            <diffuse>0.25 0.25 0.30 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- front cap at y = +6.0 (past goal line) -->
+    <model name="wall_front">
+      <static>true</static>
+      <pose>0 6.025 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>2.1 0.05 0.5</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>2.1 0.05 0.5</size></box></geometry>
+          <material>
+            <ambient>0.15 0.15 0.18 1</ambient>
+            <diffuse>0.25 0.25 0.30 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- visual-only spawn line (blue) at y = -5 -->
+    <model name="spawn_line">
+      <static>true</static>
+      <pose>0 -5.0 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><box><size>2.0 0.05 0.001</size></box></geometry>
+          <material>
+            <ambient>0.2 0.4 0.8 1</ambient>
+            <diffuse>0.3 0.55 0.95 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- visual-only goal line (green) at y = +5 -->
+    <model name="goal_line">
+      <static>true</static>
+      <pose>0 5.0 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><box><size>2.0 0.05 0.001</size></box></geometry>
+          <material>
+            <ambient>0.0 0.55 0.0 1</ambient>
+            <diffuse>0.1 0.75 0.1 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- nicer default camera: looks down the hallway from behind spawn -->
+    <gui>
+      <camera name="default_camera">
+        <pose>0 -9 4 0 0.45 1.5708</pose>
+      </camera>
+    </gui>
+
+  </world>
+</sdf>

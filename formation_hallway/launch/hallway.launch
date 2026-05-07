@@ -1,0 +1,18 @@
+<launch>
+  <arg name="gui" default="true"/>
+  <arg name="paused" default="false"/>
+  <arg name="n_robots" default="4"/>
+
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name" value="$(find formation_hallway)/worlds/hallway.world"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="paused" value="$(arg paused)"/>
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="verbose" value="false"/>
+  </include>
+
+  <!-- spawn 4 robots at the canonical square formation around (0, -5) -->
+  <node pkg="formation_hallway" type="spawn_hallway_fleet.py"
+        name="spawn_hallway_fleet" output="screen"
+        args="--n $(arg n_robots)"/>
+</launch>

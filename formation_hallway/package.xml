@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>formation_hallway</name>
+  <version>0.1.0</version>
+  <description>Gazebo hallway env for the multi-robot-formation PPO policy. 4 Triton holonomic robots in a 2x12 m hallway, with toggle-style multi-teleop and a Gym-shaped wrapper that mirrors FormationHallwayEnv.</description>
+  <maintainer email="todo@todo.todo">todo</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>gazebo_ros</build_depend>
+  <build_depend>roscpp</build_depend>
+  <build_depend>tf</build_depend>
+  <build_export_depend>gazebo_ros</build_export_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>tf</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>gazebo_msgs</exec_depend>
+
+  <export>
+    <gazebo_ros gazebo_media_path="${prefix}"/>
+    <gazebo_ros gazebo_model_path="${prefix}/models"/>
+    <gazebo_ros gazebo_plugin_path="${prefix}/../../devel/lib"/>
+  </export>
+</package>
