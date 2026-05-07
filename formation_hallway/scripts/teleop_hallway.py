@@ -32,7 +32,7 @@ import threading
 
 import rospy
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
+from gazebo_msgs.msg import ModelStates
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,20 +73,21 @@ class TeleopHallway:
             "/teleop_mask", Float32MultiArray, queue_size=1, latch=True
         )
 
-        for i in range(self.n):
-            rospy.Subscriber(
-                f"/triton_{i+1}/odom", Odometry,
-                self._make_odom_cb(i), queue_size=1,
-            )
+        rospy.Subscriber("/gazebo/model_states", ModelStates,
+                         self._model_states_cb, queue_size=1)
 
         self._publish_mask()
 
     # ------------------------------------------------------------------ subs
-    def _make_odom_cb(self, i):
-        def cb(msg: Odometry):
-            q = msg.pose.pose.orientation
+    def _model_states_cb(self, msg: ModelStates):
+        for i in range(self.n):
+            name = f"triton_{i+1}"
+            try:
+                idx = msg.name.index(name)
+            except ValueError:
+                continue
+            q = msg.pose[idx].orientation
             self.yaws[i] = yaw_from_quat(q.x, q.y, q.z, q.w)
-        return cb
 
     # ------------------------------------------------------------------ pub
     def _publish_mask(self):
