@@ -46,3 +46,8 @@
    - Removed the `--record-dir` frame-dump behavior from `code/eval_hallway.py`.
    - Removed automatic frame-recording hooks from `scripts_run_pipeline.sh`.
    - Added a dedicated pygame visualization script: `code/eval_hallway_viz.py` for post-training rendered evaluation.
+
+10. **Train with up to 3 concurrent teleop robots + goal-reaching bias**
+   - Updated `RandomTeleop` to support multiple concurrent grabs per environment and configured training with `max_grabs_per_env=3`.
+   - Tuned teleop disturbance schedule to be less aggressive at episode start while still ramping (`p_grab: 0.001 -> 0.008`, `p_release: 0.02`).
+   - Tuned reward coefficients in training env config to emphasize reaching goal and sustained forward movement (`k_fwd=7.0`, `k_goal=45.0`) while reducing over-constraint pressure (`k_form=1.2`, `k_wall=0.6`).

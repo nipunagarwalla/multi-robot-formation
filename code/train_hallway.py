@@ -35,6 +35,16 @@ from teleop import RandomTeleop
 
 
 def make_config(num_envs: int, max_time_steps: int, device: str) -> dict:
+    reward_coeffs = dict(REWARD_COEFFS)
+    reward_coeffs.update(
+        {
+            "k_fwd": 7.0,
+            "k_form": 1.2,
+            "k_wall": 0.6,
+            "k_goal": 45.0,
+            "k_stall": 0.8,
+        }
+    )
     return {
         "seed": 0,
         "clip_param": 0.2,
@@ -61,12 +71,14 @@ def make_config(num_envs: int, max_time_steps: int, device: str) -> dict:
             "device": device,
             "max_time_steps": max_time_steps,
             "render": False,
+            "reward_coeffs": reward_coeffs,
         },
         "teleop": {
-            "p_grab": 0.003,
-            "p_grab_final": 0.015,
-            "p_release": 0.01,
+            "p_grab": 0.001,
+            "p_grab_final": 0.008,
+            "p_release": 0.02,
             "drift_speed": 0.6,
+            "max_grabs_per_env": 3,
         },
         "curriculum": {
             "radius_start": 0.12,
@@ -130,6 +142,7 @@ def main():
         p_grab=config["teleop"]["p_grab"],
         p_release=config["teleop"]["p_release"],
         drift_speed=config["teleop"]["drift_speed"],
+        max_grabs_per_env=config["teleop"]["max_grabs_per_env"],
         seed=args.seed,
     )
 
@@ -143,7 +156,7 @@ def main():
             "env": config["env_config"],
             "model": config["model"],
             "teleop": config["teleop"] if teleop is not None else None,
-            "reward_coeffs": REWARD_COEFFS,
+            "reward_coeffs": config["env_config"]["reward_coeffs"],
             "args": vars(args),
             "resume": resume_meta,
             "start_iteration": start_iteration,

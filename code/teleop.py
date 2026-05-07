@@ -46,6 +46,7 @@ class RandomTeleop:
         drift_speed: float = 0.6,
         min_duration: int = 40,
         max_duration: int = 160,
+        max_grabs_per_env: int = 1,
         seed: int = 0,
     ):
         self.env = env
@@ -56,16 +57,17 @@ class RandomTeleop:
         self.drift_speed = drift_speed
         self.min_duration = min_duration
         self.max_duration = max_duration
+        self.max_grabs_per_env = max(1, int(max_grabs_per_env))
         self.rng = np.random.default_rng(seed)
-        # one active grab per env (at most one teleop'd robot at a time during training)
-        self.grabs = [None for _ in range(self.num_envs)]
+        # active grabs per env (supports >1 concurrent teleop robots)
+        self.grabs = [[] for _ in range(self.num_envs)]
         # per-env counter for the sinusoid phase
         self.steps = np.zeros(self.num_envs, dtype=np.int64)
 
     def reset_env(self, env_idx: int):
-        if self.grabs[env_idx] is not None:
-            self.env.set_teleop(env_idx, self.grabs[env_idx].robot, False)
-        self.grabs[env_idx] = None
+        for grab in self.grabs[env_idx]:
+            self.env.set_teleop(env_idx, grab.robot, False)
+        self.grabs[env_idx] = []
         self.steps[env_idx] = 0
 
     def step(self):
@@ -75,34 +77,37 @@ class RandomTeleop:
         """
         for e in range(self.num_envs):
             self.steps[e] += 1
-            grab = self.grabs[e]
-            if grab is None:
-                if self.rng.random() < self.p_grab:
-                    robot = int(self.rng.integers(0, self.n_agents))
+            active_grabs = self.grabs[e]
+            busy = {g.robot for g in active_grabs}
+            if len(active_grabs) < self.max_grabs_per_env and self.rng.random() < self.p_grab:
+                free = [r for r in range(self.n_agents) if r not in busy]
+                if free:
+                    robot = int(self.rng.choice(free))
                     duration = int(self.rng.integers(self.min_duration, self.max_duration))
                     drift_dir = 1.0 if self.rng.random() < 0.5 else -1.0
                     base_vy = float(self.rng.uniform(0.0, 0.5))
-                    self.grabs[e] = _Grab(
+                    active_grabs.append(_Grab(
                         robot=robot,
                         age=0,
                         duration=duration,
                         drift_dir=drift_dir,
                         base_vy=base_vy,
                         drift_speed=self.drift_speed,
-                    )
+                    ))
                     self.env.set_teleop(e, robot, True)
-                    grab = self.grabs[e]
-            if grab is None:
-                continue
-            grab.age += 1
-            if grab.age >= grab.duration or self.rng.random() < self.p_release:
-                self.env.set_teleop(e, grab.robot, False)
-                self.grabs[e] = None
-                continue
-            phase = grab.age * 0.15
-            vx = grab.drift_speed * grab.drift_dir * float(np.cos(phase))
-            vy = grab.base_vy
-            self.env.set_teleop_action(e, grab.robot, np.array([vx, vy], dtype=np.float32))
+
+            kept = []
+            for grab in active_grabs:
+                grab.age += 1
+                if grab.age >= grab.duration or self.rng.random() < self.p_release:
+                    self.env.set_teleop(e, grab.robot, False)
+                    continue
+                phase = grab.age * 0.15
+                vx = grab.drift_speed * grab.drift_dir * float(np.cos(phase))
+                vy = grab.base_vy
+                self.env.set_teleop_action(e, grab.robot, np.array([vx, vy], dtype=np.float32))
+                kept.append(grab)
+            self.grabs[e] = kept
 
 
 class KeyboardTeleop:
