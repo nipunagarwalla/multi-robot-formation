@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/home/nipun/formation_venv/bin/python3
 """
 The Gym-shaped wrapper around the Gazebo hallway. Loads a trained
 FormationHallwayEnv PPO policy and drives the 4 Tritons.
@@ -45,7 +45,7 @@ from std_msgs.msg import Float32MultiArray
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "config"))
 from contract import (  # noqa: E402
-    DT, FORMATION_SCALE, GOAL_Y, MAX_AGENTS, MAX_V,
+    AGENT_RADIUS, DT, FORMATION_SCALE, GOAL_Y, MAX_AGENTS, MAX_V,
     SPAWN_Y, WORLD_H, WORLD_W,
 )
 
@@ -121,13 +121,14 @@ class HallwayPolicyRunner:
         }
         self.agent = Agent(self.env_shim, agent_cfg).to(self.device)
         ckpt = load_checkpoint(weights_path, self.device)
-        self.agent.load_state_dict(ckpt["agent"])
+        self.agent.load_state_dict(ckpt["agent"], strict=False)
         self.agent.eval()
         rospy.loginfo(f"[env] loaded weights: {weights_path} (iter={ckpt.get('iteration')})")
 
         self.n = MAX_AGENTS
         self.max_steps = max_steps
         self.k_yaw = k_yaw
+        self._lock = threading.Lock()
 
         # latest odom snapshot per robot
         self.poses_xy = np.zeros((self.n, 2), dtype=np.float32)
@@ -153,8 +154,6 @@ class HallwayPolicyRunner:
 
         rospy.wait_for_service("/gazebo/set_model_state")
         self.set_state = rospy.ServiceProxy("/gazebo/set_model_state", SetModelState)
-
-        self._lock = threading.Lock()
 
     # -------------------------------------------------------------- callbacks
     def _model_states_cb(self, msg: ModelStates):
@@ -249,6 +248,26 @@ class HallwayPolicyRunner:
             tw.angular.z = -self.k_yaw * yaw
             self.cmd_pubs[i].publish(tw)
 
+    def _apply_soft_collision(self, actions: np.ndarray) -> np.ndarray:
+        """Push robots apart when closer than 2*AGENT_RADIUS.
+
+        model_push uses SetLinearVel which bypasses Gazebo's collision
+        impulse solver, so robot-robot collisions are invisible to physics.
+        """
+        result = actions.copy()
+        with self._lock:
+            poses = self.poses_xy.copy()
+        min_dist = 2.0 * AGENT_RADIUS
+        for i in range(self.n):
+            for j in range(i + 1, self.n):
+                delta = poses[i] - poses[j]
+                dist = float(np.linalg.norm(delta))
+                if 1e-6 < dist < min_dist:
+                    repulsion = (delta / dist) * (min_dist - dist) * 5.0
+                    result[i] += repulsion
+                    result[j] -= repulsion
+        return np.clip(result, -MAX_V, MAX_V)
+
     def _check_done(self):
         # goal: cluster centroid (active subset) crosses GOAL_Y
         with self._lock:
@@ -287,6 +306,7 @@ class HallwayPolicyRunner:
             action_np = action[0].cpu().numpy()  # (n, 2)
             # safety clip in case the dist samples slightly out of bound
             action_np = np.clip(action_np, -MAX_V, MAX_V)
+            action_np = self._apply_soft_collision(action_np)
 
             self._publish_action(action_np)
 

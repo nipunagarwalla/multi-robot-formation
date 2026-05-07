@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 
 import rospy
@@ -49,8 +50,30 @@ def load_template():
         return f.read()
 
 
-def spawn_one(template, name, x, y, spawn_srv):
+# RGBA colors per robot index (0-based)
+ROBOT_COLORS = [
+    (1.00, 0.20, 0.20),  # robot 1 — red
+    (0.20, 0.80, 0.20),  # robot 2 — green
+    (0.20, 0.50, 1.00),  # robot 3 — blue
+    (1.00, 0.85, 0.10),  # robot 4 — yellow
+]
+
+
+def _material_xml(r, g, b):
+    return (
+        f"<material>"
+        f"<ambient>{r:.2f} {g:.2f} {b:.2f} 1</ambient>"
+        f"<diffuse>{r:.2f} {g:.2f} {b:.2f} 1</diffuse>"
+        f"</material>"
+    )
+
+
+def spawn_one(template, name, robot_idx, x, y, spawn_srv):
     sdf = template.replace("__NS__", name)
+    # replace every existing <material>...</material> block with the robot's color
+    color = ROBOT_COLORS[robot_idx % len(ROBOT_COLORS)]
+    mat = _material_xml(*color)
+    sdf = re.sub(r"<material>.*?</material>", mat, sdf, flags=re.DOTALL)
     pose = Pose()
     pose.position.x = float(x)
     pose.position.y = float(y)
@@ -88,7 +111,7 @@ def main():
         jy = rng.uniform(-args.jitter, args.jitter)
         x = sx + jx
         y = SPAWN_Y + sy + jy
-        spawn_one(template, f"triton_{i+1}", x, y, spawn_srv)
+        spawn_one(template, f"triton_{i+1}", i, x, y, spawn_srv)
 
 
 if __name__ == "__main__":
