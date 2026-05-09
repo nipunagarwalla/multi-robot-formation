@@ -1,281 +1,141 @@
-# Plan — Dynamic Formation PPO with Teleop-in-the-Loop
-
-> **Note**: Plan mode restricts edits to this file. Per `CLAUDE.md` line 20, the implementation pass should also drop a copy of this plan at `/Users/aneeshsathe/Desktop/afor/plan.md` as the first step after approval.
-
----
+# Plan — Always-circle formation with dynamic robot count (1..10)
 
 ## 1. Context
 
-The repo currently ships three near-identical PPO environments — `code/env_line.py`, `code/env_pentagon.py`, `code/env_wedge.py` — each hardcoded to **5 robots** and a **single formation**. The existing trainer (`code/train.py`) and Beta-policy GNN model (`code/model.py`) are likewise pinned to `n_agents = 5`. The pipeline does work end-to-end (vectorised pygame envs + PPO on a GNN that already does permutation-invariant message passing within a comm-radius), but it cannot:
+We are abandoning the per-active-count multi-formation policy (4→square, 3→triangle, 2→line) shipped on `aneesh/policy_v2`. The new objective:
 
-1. Spawn a configurable number of robots and switch the *target formation* based on the active cluster size.
-2. Accept a "this robot is being driven by a human" override mid-episode and recover the formation around the loss/return of a teammate.
-3. Train robustly to that disturbance pattern.
+- The cluster **always** forms a **circle** and moves across the arena toward the goal line.
+- The number of robots is **dynamic at runtime**, between **1 and 10**.
+- Through teleop the user can: (a) drive any robot manually, (b) spawn a new robot, (c) delete an existing robot.
+- Training simulates these disturbances with a `RandomTeleop` that randomly grabs / releases / spawns / deletes.
+- Arena geometry changes: **8 m × 8 m square** (no longer a long thin hallway). Robot radius bumped to **0.2 m**.
 
-The goal is to extend AFOR (paper: arxiv 2404.01618) to **dynamic-size formation control with human teleop in the loop**:
+This branch is `aneesh/circle_policy_v1`, branched off the clean `aneesh/policy_v2` head. Code that doesn't apply anymore is deleted (not commented out). Everything is trained from scratch — v2/v3 weights won't load (action space size differs).
 
-- 4 robots spawn at one end of a long obstacle-free hallway.
-- Cluster target shape switches based on number of policy-controlled robots: **4 → square**, **3 → triangle**, **2 → horizontal line**, **1 → solo** (degenerate case, just drive to goal).
-- During inference, a human can grab/release any robot at any time (keyboard).
-- During training, a synthetic "fake teleop" disturbance simulates this: pick a robot, drive it on an off-cluster trajectory for a stretch, then return it.
-- A single shared PPO policy handles all cluster sizes via masking — the existing GNN is already permutation-invariant, so this is the minimal-code extension.
-- Rewards: forward progress, formation maintenance, anti-collision, anti-stall.
+## 2. Architecture decision
 
-The work is split across 4 people. **Decoupling is enforced by a single interface contract** (Section 3) that everyone codes against from day 1. After that contract is locked, all 4 streams proceed in parallel and only re-converge at integration.
+**Buffers stay sized to `MAX_AGENTS=10`. `present_mask` becomes the live source of truth for "does this robot exist right now."** This re-uses the same masking pattern the env already has for `teleop_mask`, avoids any dynamic tensor reshaping, and keeps rollout buffers at a fixed `(T, num_envs, 10, 2)` shape end-to-end.
 
----
+A robot's runtime state is two bits:
 
-## 2. High-Level Approach
+| `present_mask` | `teleop_mask` | meaning |
+|---:|---:|---|
+| 1 | 0 | **active** — in the world, GNN/policy controls it, counts toward the circle, earns rewards |
+| 1 | 1 | **teleop'd** — in the world, human-controlled, does **not** count toward the circle, earns no policy reward |
+| 0 | 0 | **deleted** — not in the world; not rendered; excluded from GNN, formation, rewards, collisions |
+| 0 | 1 | invalid — `delete()` always clears teleop too |
 
-A single new env module — `code/env_hallway.py` — replaces (does not modify) the three existing env files. It adopts the same `PassageEnv`/`PassageEnvRender` skeleton from `env_line.py` but generalises:
+Active cluster size: `n_active = sum(present_mask * (1 - teleop_mask))`. The circle target is built for `n_active` robots.
 
-- `MAX_AGENTS = 4` (fixed buffer width); active count varies per step via masks.
-- Long rectangular hallway, no obstacles. World ≈ `2.0m × 12.0m`. Spawn near `y = -5`, goal at `y ≈ +5`.
-- Two orthogonal masks per robot, both in the observation:
-  - `present_mask[i] ∈ {0,1}` — is robot `i` part of the simulation at all (always 1 in v1; reserved for future "robot-out-of-world" cases).
-  - `teleop_mask[i] ∈ {0,1}` — is robot `i` currently under human / synthetic-teleop control.
-- The **active cluster** = robots with `teleop_mask == 0`. The target formation is selected by `active_count`:
-  - 4 → square (side `s`), 3 → equilateral triangle (side `s`), 2 → horizontal line (gap `s`), 1 → no formation term.
-- Teleoperated robots **physically remain in the world** (so policy must avoid colliding with them) but are excluded from the formation reward.
-- Reusable from existing code (do not re-derive): `compute_agent_dists`, `compute_obstacle_dists`, kinematic integration with velocity clipping + acceleration limits, the pygame coordinate transform, the rollout buffer scaffolding in `train.py`.
+Non-present robots are parked at a far-away sentinel position so `radius_graph` naturally drops them from message passing, and their action outputs are masked to zero in the loss.
 
-The PPO model gains a tiny extension: the per-robot input vector grows by 2 (one bit each for `teleop_mask` and `present_mask`), and the loss is masked so gradients flow only through policy-controlled robots. The number of agents passed through the GNN stays fixed at `MAX_AGENTS = 4` — teleoperated robots are kept in the graph as obstacles (the GNN sees their state but their action is overridden and their loss contribution is zeroed).
+## 3. Critical files
 
----
-
-## 3. Interface Contract (lock this on Day 1, do not change unilaterally)
-
-This is the ONE thing all four people agree on before splitting. Put it in `code/contract.py` as a docstring + dataclass; everyone imports `MAX_AGENTS`, `WORLD_DIM`, etc., from there.
-
-```python
-# code/contract.py
-MAX_AGENTS = 4
-DT = 0.05
-WORLD_W = 2.0
-WORLD_H = 12.0
-SPAWN_Y = -5.0
-GOAL_Y  = +5.0
-MAX_V   = 1.0
-MAX_A   = 2.0
-AGENT_RADIUS = 0.08
-FORMATION_SCALE = 0.35  # side / gap of square/triangle/line in metres
-```
-
-`FormationHallwayEnv(gym.Env)` (lives in `code/env_hallway.py`):
-
-| Member | Type / shape | Notes |
+| file | role | what changes |
 |---|---|---|
-| `observation_space` | `Dict` | keys: `pos (4,2)`, `vel (4,2)`, `goal (2,)`, `teleop_mask (4,)`, `present_mask (4,)`, `time (1,)` |
-| `action_space` | `Box(low=-MAX_V, high=MAX_V, shape=(4,2))` | full action always supplied; env overrides teleop slots |
-| `reset(seed=None)` | → `obs, info` | |
-| `step(action)` | → `obs, reward (4,), done, trunc, info` | per-robot reward; loss masking handled by trainer |
-| `set_teleop(idx:int, active:bool)` | side-effect | flips `teleop_mask[idx]`. Idempotent. |
-| `set_teleop_action(idx:int, vel:np.ndarray)` | side-effect | sets the override velocity for the next `step`. |
-| `target_formation_positions(active_count)` | → `(active_count, 2)` | pure function, exposed for visualisation |
-| `render(mode='human'\|'rgb_array')` | → `None` or `ndarray` | reuses `PassageEnvRender` pattern |
+| `code/contract.py` | constants + REWARD_COEFFS | `MAX_AGENTS=10`, add `MIN_AGENTS=1`, `INITIAL_AGENTS=4`, `AGENT_RADIUS=0.2` (was 0.08), `WORLD_W=WORLD_H=8.0` (was 2×12), `SPAWN_Y=-3.5`, `GOAL_Y=3.5`, formation now circle-only — drop `FORMATION_SCALE` for `CIRCLE_SIDE=0.6` (must exceed `2·AGENT_RADIUS=0.4` plus margin) |
+| `code/env_hallway.py` | env, formation reward, step | rewrite `target_formation_positions` for circle; gate every reward by `present_mask`; add `spawn(env_idx, robot_idx=None)` / `delete(env_idx, robot_idx)`; rewrite `get_starts_and_goals` to spawn only the initial set; non-present robots parked at `(SENTINEL_X, SENTINEL_Y)` outside `WORLD_H`; goal check uses active-cluster centroid; episode terminates if `n_present == 0` |
+| `code/model.py` | GNN + Beta policy | already reads `n_agents` from obs space — flips to 10 cleanly. `use_masks=True` already wired by all callers. Sentinel positions handle GNN edge filtering — no model code change needed. |
+| `code/teleop.py` | KeyboardTeleop + RandomTeleop | KeyboardTeleop: 1-9 toggle teleop on robot 1-9, `0` toggles robot 10, `=`/`+` spawns, `-`/`_` deletes the most-recently-selected robot, `r` releases all, WASD/Z/X unchanged. RandomTeleop: add `p_spawn` / `p_delete` and `init_n_present_dist`; ensure 1 ≤ `n_present` ≤ 10 always. |
+| `code/render_hallway.py` | pygame renderer | Iterate `present_mask` for robot drawing. Formation overlay draws a circle of `n_active` slots at variable radius. HUD shows `n_present / n_active / n_teleop`. Square arena geometry. Robot color palette extended to 10. |
+| `code/eval_hallway.py` | per-regime eval | Replace `--fixed-active-count` with `--fixed-n-present` (1..10). Bucket episodes by `min_n_present` seen during episode; per-regime stats over k ∈ {1..10}. |
+| `code/train_hallway.py` | PPO trainer | Buffer alloc uses `MAX_AGENTS=10`. Loss masked by `present_mask * (1 - teleop_mask)`. Drop the per-active-count CSV columns; replace with `mean_n_present`, `mean_formation_error`, `mean_circle_radius`. CLI flags `--p-spawn` / `--p-delete` / `--init-n-present-dist`. |
+| `code/metrics.py` | CSV schema | Drop `formation_error_active_{1..4}` and `n_episodes_active_{1..4}`. Add `mean_n_present`, `mean_formation_error`, `mean_circle_radius`. `EpisodeAccumulator` tracks `min_n_present`. |
+| `code/run_demo.py` | demo binary | Inherits new KeyboardTeleop keys; refresh help text and HUD line. |
+| `tests/test_formation.py` | unit tests | Delete square/triangle/line/`unsupported_count_raises`. Add: `test_circle_n_points`, `test_circle_centred`, `test_circle_radius_scaling`, `test_circle_n1_returns_origin`. |
+| `tests/test_teleop.py` | teleop tests | Drop `init_regime_dist`-of-length-4 assumptions. Add `test_spawn_increments_present_count`, `test_delete_decrements_present_count`, `test_delete_clears_teleop`, `test_min_one_robot_invariant`, `test_max_ten_robots_invariant`. |
 
-**Rule:** anything not in this table is implementation-private. If you need a new field, post in the team channel before adding it — the masks/buffer shape ripple through everyone's code.
+## 4. Circle geometry
 
----
+`target_formation_positions(n_active)` returns `n_active` points on a circle centred at origin. Spacing: aim for a constant inter-neighbour chord length `CIRCLE_SIDE = 0.6`. This must exceed `2·AGENT_RADIUS = 0.4` so adjacent robots don't permanently overlap; 0.6 leaves a 0.2 m centre-to-centre margin. Then `r(n) = CIRCLE_SIDE / (2 sin(π/n))`. Special cases: `n=1` → `[[0,0]]`; `n=2` → `[±CIRCLE_SIDE/2, 0]`.
 
-## 4. Reward Design (single source of truth)
+| n  | r       | diameter | outer extent (incl. robot bodies) |
+|----|---------|----------|------------------------------------|
+| 1  | —       | 0        | 0.4                                |
+| 2  | 0.30    | 0.60     | 1.00                               |
+| 3  | 0.35    | 0.69     | 1.09                               |
+| 4  | 0.42    | 0.85     | 1.25                               |
+| 5  | 0.51    | 1.02     | 1.42                               |
+| 6  | 0.60    | 1.20     | 1.60                               |
+| 7  | 0.69    | 1.38     | 1.78                               |
+| 8  | 0.78    | 1.57     | 1.97                               |
+| 9  | 0.88    | 1.75     | 2.15                               |
+| 10 | 0.97    | 1.94     | 2.34                               |
 
-Per-robot reward for robot `i` with `teleop_mask[i] == 0`:
+Even at n=10 the cluster footprint (2.34 m) fits comfortably inside the 8 m × 8 m arena. Hungarian assignment from active robots → slots — same code path that exists today, just over `n_active`.
 
-| Term | Formula | Coeff |
-|---|---|---|
-| Forward progress | `+ k_fwd * (y_i_t - y_i_{t-1})` | `k_fwd = 5.0` |
-| Stall penalty | `- k_stall` if cluster centroid moved < `eps` over last `K` steps | `k_stall = 0.5`, `K = 20`, `eps = 0.02` |
-| Formation error | `- k_form * mean( |dist_to_target_slot| )` after Hungarian-assigning robots to slots of the target shape | `k_form = 2.0` |
-| Inter-robot collision | `- k_coll` if any pairwise dist < `2 * AGENT_RADIUS` | `k_coll = 5.0` |
-| Wall collision | `- k_wall * abs(x_overshoot)` | `k_wall = 1.0` |
-| Goal bonus | `+ k_goal` once `mean(y) > GOAL_Y` for the active cluster | `k_goal = 20.0` |
+## 5. Reward surface (single global set, no per-count keys)
 
-For robot `i` with `teleop_mask[i] == 1`: reward is `0` (will be masked out anyway). Coeffs are starting points; expect to tune.
+Per-step, per-robot, summed:
 
-The Hungarian assignment is per-step over the `active_count` policy-controlled robots vs the `active_count` slots from `target_formation_positions(active_count)`, centred on the cluster centroid and rotated to align long-axis with `+y`. Use `scipy.optimize.linear_sum_assignment` (already in deps).
+- `+k_fwd · dy` — forward progress in y (gated by `present * (1-teleop)`).
+- `-k_form · slot_dist` — Hungarian distance to circle slot (gated by `present * (1-teleop)`).
+- `-k_coll` — pairwise collision penalty among present robots only.
+- `-k_wall · overshoot_x` — x-boundary overshoot (present robots only).
+- `-k_stall` — applied if the active centroid hasn't moved for `stall_window` steps.
+- `+k_goal` — one-shot when the active centroid reaches `GOAL_Y`.
 
----
+Coefficients start at the v2 defaults (`k_fwd=5, k_stall=0.5, k_form=2, k_coll=5, k_wall=1, k_goal=20`). Tune after the first smoke run.
 
-## 4.5 Metrics & Logging (persisted, for cross-run comparison)
+Episode termination: `timeout` OR `goal_reached` OR `n_present == 0` (degenerate empty cluster).
 
-Every training run writes to a per-run directory `runs/<timestamp>_<tag>/` (e.g. `runs/20260502_193000_hallway-v0/`). Three files are emitted, all append-only so a crashed run still yields a partial record:
+## 6. Spawn / delete semantics
 
-**`config.json`** (one-shot, written at run start)
-- All PPO hyperparameters (gamma, lambda, clip, lr, epochs, batch sizes, num_envs, num_iterations)
-- Reward coefficients from Section 4 (`k_fwd`, `k_stall`, `k_form`, `k_coll`, `k_wall`, `k_goal`)
-- Env constants from `contract.py`
-- `RandomTeleop` parameters (`p_grab`, `p_release`, `drift_speed`)
-- Git commit SHA, timestamp, machine name, torch + CUDA versions
+- **Spawn:** picks the lowest free index where `present_mask[i] == 0`. Position: cluster centroid + small random offset; velocity zero; teleop_mask cleared. No-op if all 10 slots occupied.
+- **Delete:** clears `present_mask[i]`, `teleop_mask[i]`, `teleop_vels[i]`; parks position at sentinel `(WORLD_H*2, WORLD_H*2)` so it falls outside `radius_graph` and is never drawn. No-op if `n_present == 1` (preserve min-1 invariant).
+- KeyboardTeleop `delete` removes the **currently-selected** (last-toggled-on-teleop) robot if there is one, else the highest-index present robot.
 
-**`iterations.csv`** (one row per PPO iteration — this is the primary comparison artefact)
-Columns: `iter, wall_time_s, env_steps, policy_loss, value_loss, entropy, total_loss, approx_kl, clip_frac, grad_norm, mean_reward, mean_episode_length, lr`. Write after the SGD update for each iteration.
+## 7. Random disturbance schedule (training)
 
-**`episodes.jsonl`** (one JSON object per finished episode — richer per-event detail)
-Fields: `iter, env_id, episode_length, total_reward, reached_goal (bool), num_collisions, num_wall_hits, num_teleop_grabs, max_active_count, min_active_count, formation_error_mean, formation_error_per_active_count (dict {2,3,4 → float}), forward_velocity_mean, stall_steps`. Logged when `done` fires.
+`RandomTeleop` runs four independent Bernoulli per step per env:
+- `p_grab`: grab a present, non-teleop'd robot for a random duration with sinusoidal lateral push.
+- `p_release`: release a teleop'd robot.
+- `p_spawn` (NEW): spawn a new robot if `n_present < 10`. Default 0.002.
+- `p_delete` (NEW): delete a present, non-teleop'd robot if `n_present > 1`. Default 0.002.
 
-**Checkpoints** continue to land at `runs/<run>/weights/weights_epoch{i}.pt` (keep every 50th iter + last). A `weights/latest.pt` symlink points at the most recent.
+At episode reset, sample initial `n_present ∈ [1..10]` from a coverage-flat distribution. Pre-seed `present_mask` accordingly.
 
-A tiny `code/scripts/compare_runs.py` reads N run dirs and prints a table + saves `runs/_comparison/<timestamp>.png` plots (mean reward + formation error per active-count, over iterations). This is a stretch deliverable — the data is the must-have, plots are nice-to-have.
+All p-values tunable from the trainer CLI: `--p-grab`, `--p-release`, `--p-spawn`, `--p-delete`, `--init-n-present-dist`.
 
-**Why these formats:** CSV for metrics that are tabular and compared across runs (pandas-friendly, opens in any tool). JSONL for richer per-episode events that may grow new fields without breaking historical files. JSON for the one-shot config so it's diffable.
+## 8. 4-person task split (parallel-friendly)
 
----
+**Step 0 (~30 min, blocks everyone):** Person A lands the API surface — contract.py constants and env_hallway.py method **signatures** for `spawn`, `delete`, and `target_formation_positions(n) → circle`, with stub bodies that just toggle the masks (no reward changes yet). Push to `aneesh/circle_policy_v1` so B/C/D can branch off.
 
-## 5. Work Split (4 people, minimal blocking)
+After step 0, B/C/D run independently:
 
-All four start by reading Section 3 and confirming the contract via PR. After that, the dependency DAG is essentially flat — each person has stubs they can develop against.
+| Person | Files | Deliverable | Blocked by |
+|---|---|---|---|
+| **A: env + reward** | `contract.py`, `env_hallway.py` | Real circle target, present-mask-gated rewards, sentinel positions for non-present, goal check uses active centroid, env smoke green | self |
+| **B: training + metrics** | `train_hallway.py`, `metrics.py` | Buffers sized to MAX_AGENTS=10, loss masked by present, dropped per-active CSV columns, replaced with present-aware columns; trainer launches and writes valid CSV/JSON | A's stubs |
+| **C: teleop + renderer** | `teleop.py`, `render_hallway.py` | KeyboardTeleop with 0-9 / `=` / `-` / `r`, RandomTeleop with p_spawn / p_delete and `init_n_present_dist`, renderer iterates present_mask and draws circle outline + updated HUD | A's stubs |
+| **D: eval + tests + demo** | `eval_hallway.py`, `tests/test_formation.py`, `tests/test_teleop.py`, `run_demo.py` | Eval with `--fixed-n-present`, tests rewritten for circle, demo with refreshed help text and key bindings | A's stubs |
 
-### Person 1 — Env Core (`code/env_hallway.py`)
+Final integration (~1 h, after A/B/C/D converge): A merges, runs the trainer smoke (50 iters fixed n=4) + tests, then runs trainer smoke (50 iters dynamic n) and confirms PPO health metrics.
 
-**Deliverable:** `FormationHallwayEnv` and `FormationHallwayEnvRender` (a thin pygame wrapper) implementing the contract in Section 3.
+## 9. Verification (in order, each gates the next)
 
-**Tasks**
-1. Copy the `PassageEnv` skeleton from `env_line.py` (lines 39–426) into `env_hallway.py`. Keep `compute_agent_dists`, `sample_pos_noise`, the kinematic integrator, the wall-clip logic. Drop all obstacle code.
-2. Set world to `WORLD_W × WORLD_H`. Spawn 4 robots in a small jittered square around `(0, SPAWN_Y)`. Goal `(0, GOAL_Y)`.
-3. Implement `target_formation_positions(n)` for `n ∈ {1,2,3,4}`. Pure function; unit-test it standalone.
-4. Implement reward terms from Section 4. Hungarian assignment with `scipy.optimize.linear_sum_assignment`.
-5. Implement `set_teleop` / `set_teleop_action`. In `step`, overwrite slots of the incoming `action` array where `teleop_mask == 1` with the stored override velocities (default zero if none set).
-6. Vectorised version (`num_envs > 1`) — keep parity with the existing `PassageEnv` pattern; needed for fast PPO rollouts. If this turns out costly, ship a single-env version first and let Person 3 wrap with `gym.vector` as a stopgap.
+1. `pytest tests/` — all pass.
+2. `python code/env_hallway.py --random --steps 200` — env smoke runs without crash.
+3. `python code/teleop.py --demo` — RandomTeleop visits all `n_present` values 1..10 in 400 steps with default disturbance probabilities.
+4. **PPO health smoke** — 50 iters from scratch, `n_present` fixed at 4 (`--p-spawn 0 --p-delete 0 --init-n-present-dist 0,0,0,1,0,0,0,0,0,0`):
+   - `entropy` rises (less negative each iter)
+   - `approx_kl` ≥ 1e-4 by iter 20
+   - `clip_frac` ≥ 0.02 by iter 50
+   - score improves
+5. **Dynamic-count smoke** — 100 iters with default disturbance schedule. `mean_n_present` over the run is roughly uniform in [1..10] and the trainer doesn't crash.
+6. **Full run** — 800 iters, `--save-best-on-eval --eval-every 25 --eval-episodes 10 --eval-n-present-counts 1,2,5,10`. Target per-regime success ≥ 60% in each evaluated count.
+7. **Visual demo** — `python code/run_demo.py --weights runs/<ts>_circle-v1/weights/best.pt --reset-on-done`. Walk-through:
+   - 4 robots spawn, form a circle, move toward goal.
+   - Press `=` three times → 7 robots, circle expands smoothly.
+   - Press `-` twice → 5 robots, circle contracts smoothly.
+   - Press `3` to teleop robot 3 away with WASD; the remaining cluster reforms a circle and continues forward.
+   - Verify min-1 / max-10 invariants by spamming `=` and `-`.
 
-**Independent deliverables / tests**
-- `pytest tests/test_formation.py` — formation positions are correct shape, centred at origin, expected distances.
-- `python -m code.env_hallway --random` — spins up the env with random actions and prints rewards (no rendering needed for this).
+## 10. Out of scope
 
-**Depends on:** Section 3 contract only.
-
----
-
-### Person 2 — Teleop (`code/teleop.py`)
-
-**Deliverable:** Two classes that drive the env's teleop interface.
-
-**Tasks**
-1. `RandomTeleop(env, p_grab=0.005, p_release=0.01, drift_speed=0.6)` — at each step, with prob `p_grab` if any robot is currently free, pick one and call `env.set_teleop(i, True)`; with prob `p_release` if any teleop'd, free it. While teleop'd, push that robot on a sinusoidal lateral drift away from the cluster centroid for a randomly-sampled duration. **This is what runs during training.**
-2. `KeyboardTeleop(env)` — pygame key handler:
-   - `1/2/3/4` → toggle teleop on robot 1..4
-   - `WASD` → drive currently-selected teleop robot
-   - `0` → release all
-   Returns the per-step velocity vector to pass to `env.set_teleop_action`. **This is what runs during eval.**
-3. Demo script `python -m code.teleop --demo` that opens a tiny pygame window with mocked positions and prints which robot is teleop'd. Lets Person 2 develop without waiting for Person 1.
-
-**Independent deliverables / tests**
-- Stub env (`tests/fake_env.py`) implements just `set_teleop` / `set_teleop_action` / `step` returning fixed obs. Person 2 unit-tests both teleop classes against this.
-
-**Depends on:** Section 3 contract only.
-
----
-
-### Person 3 — Model + Trainer (`code/model.py`, `code/train.py`)
-
-**Deliverable:** PPO trains stably on `FormationHallwayEnv` with the random-teleop disturbance active.
-
-**Tasks**
-1. **Model patch (`model.py`):**
-   - Change `self.n_agents = 5` (line 99) → read from env, expect `4`.
-   - Grow per-robot input feature dim from 6 → 8 (append `teleop_mask[i]`, `present_mask[i]`). Update encoder input dim at line 45.
-   - Output / Beta-distribution path is unchanged.
-2. **Trainer patch (`train.py`):**
-   - Swap `from env_line import PassageEnv` for `from env_hallway import FormationHallwayEnv`.
-   - Pre-allocate buffers with `MAX_AGENTS = 4`.
-   - Wire in `RandomTeleop` from Person 2: each env owns one instance, called inside the rollout loop just before `env.vector_step`.
-   - **Loss masking:** in the PPO update, multiply per-robot policy and value losses by `(1 - teleop_mask)` before reducing. Renormalise by `sum(1 - teleop_mask)` instead of `n_agents`.
-   - **Persistent metrics (Section 4.5):** at the start of training, create `runs/<timestamp>_<tag>/`, write `config.json`. After each PPO iteration, append a row to `iterations.csv` with all the columns listed in 4.5 (read them out of the PPO update — `policy_loss`, `value_loss`, `entropy`, `approx_kl`, `clip_frac`, `grad_norm` are all already computed locally; just plumb them into a writer). On every `done` flag inside the rollout loop, append a JSON line to `episodes.jsonl` with the per-episode aggregates (track these in a small per-env accumulator that resets on `reset()`). Keep one `print` per iteration as a convenience but make the CSV/JSONL the source of truth.
-   - Checkpoint to `runs/<run>/weights/weights_epoch{i}.pt`; maintain `weights/latest.pt` symlink.
-3. PPO hyperparameters: keep current values (gamma 0.995, lambda 0.95, clip 0.2, lr 5e-5, 10 SGD epochs, train_batch 65536, minibatch 4096). Drop `num_envs` from 32 → 16 if memory tight on 4 robots.
-
-**Independent deliverables / tests**
-- Develop against a stub `FakeHallwayEnv` (≈30 lines, returns random obs of the right shape) until Person 1's env is ready. The stub satisfies the Section 3 contract.
-- Sanity run: 100 iterations should show non-decreasing mean reward.
-
-**Depends on:** Section 3 contract; uses `RandomTeleop` from Person 2 at integration time.
-
----
-
-### Person 4 — Render + Eval + Integration glue (`code/render_hallway.py`, `code/eval.py`, `code/run_demo.py`)
-
-**Deliverable:** A working `python -m code.run_demo --weights weights/hallway-v0/weights_epoch_latest.pt` that opens a pygame window, runs the trained policy, and lets the user keyboard-teleop any robot.
-
-**Tasks**
-1. `render_hallway.py` — extend the existing `PassageEnvRender` pattern: draw 4 colored circles, target-formation outline (faded), arrow from each robot to its formation slot, a visible "TELEOP" marker on currently-teleop'd robots, hallway walls, goal line.
-2. Update `eval.py`: load checkpoint with the new model architecture (input dim 8 instead of 6), step env at `1/DT` Hz, print episode reward.
-3. `run_demo.py`: wires `FormationHallwayEnv` + `KeyboardTeleop` (Person 2) + trained policy (Person 3) + renderer. This is the demo binary.
-4. Develop the renderer against Person 1's env stub or hand-rolled fake state — colored circles in a hallway.
-
-**Independent deliverables / tests**
-- `python -m code.render_hallway --self-test` cycles through N=4/3/2/1 with hard-coded positions and verifies all four formation overlays draw correctly.
-
-**Depends on:** Section 3 contract; uses real env from Person 1 and trained weights from Person 3 only at the final demo.
-
----
-
-## 6. Integration Milestones
-
-| Day | Milestone | Owner |
-|---|---|---|
-| 0 | `contract.py` merged. All 4 people can `from contract import *`. | Whoever opens the repo first |
-| 2 | Stubs ready: Person 3 has `FakeHallwayEnv`, Person 2 has `tests/fake_env.py`, Person 4 has fake-state renderer. **Critical: nobody is blocked.** | All |
-| 4 | Person 1's env passes its self-test (random actions, sensible rewards). | P1 |
-| 5 | Person 3 swaps stub → real env, kicks off first real training run. | P3 |
-| 5 | Person 4 swaps fake state → real env render. | P4 |
-| 6 | Person 2's `KeyboardTeleop` integrated into Person 4's demo. | P2 + P4 |
-| 7 | First end-to-end demo: trained policy, human pulls a robot out, formation collapses 4→3, robot returns, formation re-forms. | All |
-
----
-
-## 7. Critical Files & Reuse Map
-
-**New files (do not touch existing envs):**
-- `code/contract.py` — constants + interface docstring
-- `code/env_hallway.py` — env (Person 1)
-- `code/teleop.py` — `RandomTeleop` + `KeyboardTeleop` (Person 2)
-- `code/render_hallway.py` — pygame renderer (Person 4)
-- `code/run_demo.py` — interactive demo (Person 4)
-- `code/metrics.py` — tiny `RunLogger` class wrapping `config.json` / `iterations.csv` / `episodes.jsonl` writers (Person 3, ~80 lines)
-- `code/scripts/compare_runs.py` — read N run dirs, print + plot comparisons (Person 3, stretch)
-- `tests/test_formation.py`, `tests/fake_env.py` — fixtures
-- `runs/` — created on first training run, .gitignored
-
-**Files modified in place:**
-- `code/model.py` — small patches at lines 45, 99, 119 to make `n_agents` and input dim parametric (Person 3)
-- `code/train.py` — env import, buffer dims, teleop integration, masked loss (Person 3)
-- `code/eval.py` — load new architecture, attach renderer (Person 4)
-
-**Files left alone:**
-- `code/env_line.py`, `code/env_pentagon.py`, `code/env_wedge.py` — keep working as the published baseline.
-
-**Reusable functions to lift verbatim** (cite by `file:line`):
-- `code/env_line.py:115` `sample_pos_noise`
-- `code/env_line.py:123` `compute_agent_dists`
-- `code/env_line.py:270-286` velocity-clip + acceleration-limit + position-update kinematics
-- `code/env_line.py:436-491` pygame coordinate transform + draw primitives
-- `code/model.py:11-30` `ModGNNConv` (no changes)
-- `code/train.py:121-187` rollout buffer + GAE (only the `n_agents` dim changes)
-
----
-
-## 8. Verification
-
-### Per-component smoke tests (each owner runs locally before merge)
-- **Env:** `pytest tests/test_formation.py` and `python -m code.env_hallway --random --steps 200` — no crashes, rewards in sane range, formation reward ≈ 0 when robots placed exactly on slots.
-- **Teleop:** `python -m code.teleop --demo` — pygame window shows teleop selection cycling.
-- **Model/Trainer:** Sanity training run of 100 iterations on 4-robot env with random teleop active — mean reward should increase, no NaNs in loss.
-- **Renderer:** `python -m code.render_hallway --self-test` — visual confirmation of all 4 formation overlays.
-
-### End-to-end acceptance test
-1. Train: `python -m code.train --iterations 5000 --tag hallway-v0` (≈1–2 hrs on a single GPU; tune iterations down for the smoke run). Confirm `runs/<ts>_hallway-v0/iterations.csv` is growing and `episodes.jsonl` has rows for both teleop'd and non-teleop'd episodes.
-2. Eval headless: `python -m code.eval --weights runs/<ts>_hallway-v0/weights/weights_epoch_latest.pt --episodes 20 --no-render` — also writes `runs/<ts>_hallway-v0/eval.json` (per-episode reward, cluster forward velocity, formation error per active count, success bool). Pass criterion: cluster reaches goal in ≥80% of episodes when no teleop disturbance is applied at eval.
-2b. Sanity-check the metrics: `python -m code.scripts.compare_runs runs/<ts>_hallway-v0` — confirm policy_loss trends down, mean_reward trends up, formation error per active-count is finite for all of {2,3,4}.
-3. Demo: `python -m code.run_demo --weights weights/hallway-v0/weights_epoch_latest.pt`. Manually verify:
-   - Cluster moves down hallway in a square.
-   - Press `1` → robot 1 highlighted as teleop, drive it sideways with WASD; remaining 3 should re-form a triangle.
-   - Press `1` again to release; robot 1 should rejoin and the cluster should re-form a square.
-   - Pull two robots out → remaining 2 form a horizontal line.
-4. Stretch: record a 30-sec video of the demo for the README.
-
-### What is explicitly out of scope (so we don't get stuck polishing)
-- No tensorboard / wandb (print logging is fine for the prototype).
-- No curriculum learning over teleop probability — fixed `p_grab` is enough.
-- No formation rotation to arbitrary headings — long-axis aligned to `+y` (direction of travel) is enough for a hallway.
-- No multi-policy ensemble per cluster size — single shared policy is the target.
-- No obstacle generalisation — empty hallway only.
+- Warm-starting from v2/v3 weights (action_space size changes 4→10).
+- Heterogeneous robots / per-robot capabilities.
+- Obstacles in the arena.
+- Non-circle formation shapes — explicitly removed.
+- 3D, more than 10 robots, multiple cooperating clusters.
+- MPS/GPU — CPU only.
