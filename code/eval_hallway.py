@@ -1,15 +1,17 @@
 """Headless or rendered evaluation of a trained FormationHallway policy.
 
 Writes <run-dir>/eval.json with per-episode reward, forward velocity,
-formation error per active count, and a success bool. With --teleop, the
-new RandomTeleop default (multi-grab + initial regime) means episodes
-span all four active-count regimes; the JSON includes a per_regime
-breakdown bucketed by min_active_count of each episode.
+formation error, success bool, and the mean / min / max n_present visited
+during the episode. With --teleop, RandomTeleop drives all four
+mechanisms (grab / release / spawn / delete) so episodes span the full
+1..MAX_AGENTS regime spectrum; the JSON includes a per_regime breakdown
+bucketed by min_n_present.
 
 Usage:
   python code/eval_hallway.py --weights runs/<ts>/weights/latest.pt --episodes 20
   python code/eval_hallway.py --weights runs/<ts>/weights/latest.pt --render
   python code/eval_hallway.py --weights runs/<ts>/weights/latest.pt --teleop
+  python code/eval_hallway.py --weights runs/<ts>/weights/latest.pt --fixed-n-present 7
 """
 from __future__ import annotations
 
@@ -27,7 +29,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from checkpoint import load_checkpoint
-from contract import MAX_AGENTS
+from contract import MAX_AGENTS, MIN_AGENTS
 from env_hallway import FormationHallwayEnv
 from metrics import EpisodeAccumulator
 from model import Agent
@@ -40,7 +42,7 @@ def _build_agent(env, device):
             "custom_model_config": {
                 "activation": "relu",
                 "msg_features": 32,
-                "comm_range": 2.0,
+                "comm_range": 4.0,
                 "use_masks": True,
             }
         }
@@ -58,10 +60,23 @@ def main():
     ap.add_argument("--render", action="store_true")
     ap.add_argument("--teleop", action="store_true",
                     help="apply RandomTeleop disturbance during eval")
+    ap.add_argument(
+        "--fixed-n-present",
+        type=int,
+        default=None,
+        help=f"hold n_present constant at this value ({MIN_AGENTS}..{MAX_AGENTS}); "
+             "implicitly disables --teleop spawn/delete events",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None,
                     help="path for eval.json (defaults to alongside the weights)")
     args = ap.parse_args()
+
+    if args.fixed_n_present is not None:
+        if not (MIN_AGENTS <= args.fixed_n_present <= MAX_AGENTS):
+            raise SystemExit(
+                f"--fixed-n-present must be in [{MIN_AGENTS}, {MAX_AGENTS}]"
+            )
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -71,20 +86,34 @@ def main():
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     device = torch.device("cpu")
 
-    env = FormationHallwayEnv(
-        {
-            "num_envs": args.num_envs,
-            "max_time_steps": args.max_steps,
-            "device": "cpu",
-            "render": False,
-        }
-    )
+    env_cfg = {
+        "num_envs": args.num_envs,
+        "max_time_steps": args.max_steps,
+        "device": "cpu",
+        "render": False,
+    }
+    if args.fixed_n_present is not None:
+        env_cfg["initial_agents"] = int(args.fixed_n_present)
+    env = FormationHallwayEnv(env_cfg)
     agent = _build_agent(env, device)
     ckpt = load_checkpoint(args.weights, device)
     agent.load_state_dict(ckpt["agent"])
     agent.eval()
 
-    teleop = RandomTeleop(env, seed=args.seed) if args.teleop else None
+    teleop = None
+    if args.teleop:
+        teleop_kwargs = dict(seed=args.seed)
+        if args.fixed_n_present is not None:
+            # pin RandomTeleop to this n_present: zero spawn/delete probs
+            # and a one-hot init distribution
+            dist = [0.0] * MAX_AGENTS
+            dist[args.fixed_n_present - 1] = 1.0
+            teleop_kwargs.update(
+                p_spawn=0.0,
+                p_delete=0.0,
+                init_n_present_dist=dist,
+            )
+        teleop = RandomTeleop(env, **teleop_kwargs)
 
     renderer = None
     clock = None
@@ -120,7 +149,9 @@ def main():
                 per_agent_rewards=[infos[e]["rewards"][k] for k in range(MAX_AGENTS)],
                 active_count=int(infos[e]["active_count"]),
                 teleop_mask=obs[e]["teleop_mask"],
+                n_present=int(infos[e]["n_present"]),
                 formation_err=infos[e]["formation_error"],
+                circle_radius=float(infos[e].get("circle_radius", 0.0)),
                 fwd_velocity=float(infos[e]["fwd_velocity"]),
                 stalled=bool(infos[e]["stalled"]),
                 had_collision=bool(infos[e]["collided"]),
@@ -152,12 +183,11 @@ def main():
             if eps_done >= args.episodes:
                 break
 
-    # bucket episodes by min_active_count — that's the "hardest" regime each
-    # episode visited and the most informative single label for per-regime
-    # success rates
+    # Per-regime bucketing keyed on min_n_present (the hardest cluster size
+    # the policy was forced to handle during the episode).
     per_regime: dict = {}
-    for k in (1, 2, 3, 4):
-        bucket = [r for r in records if r.get("min_active_count") == k]
+    for k in range(MIN_AGENTS, MAX_AGENTS + 1):
+        bucket = [r for r in records if r.get("min_n_present") == k]
         if not bucket:
             per_regime[str(k)] = {"n_episodes": 0}
             continue
@@ -168,12 +198,14 @@ def main():
             "mean_episode_length": float(np.mean([r["episode_length"] for r in bucket])),
             "mean_forward_velocity": float(np.mean([r["forward_velocity_mean"] for r in bucket])),
             "mean_formation_error": float(np.mean([r["formation_error_mean"] for r in bucket])),
+            "mean_circle_radius": float(np.mean([r["circle_radius_mean"] for r in bucket])),
         }
 
     summary = {
         "weights": os.path.abspath(args.weights),
         "wall_time_s": round(time.time() - t0, 2),
         "episodes": len(records),
+        "fixed_n_present": args.fixed_n_present,
         "success_rate": float(np.mean([r["reached_goal"] for r in records])) if records else 0.0,
         "mean_total_reward": float(np.mean([r["total_reward"] for r in records])) if records else 0.0,
         "mean_episode_length": float(np.mean([r["episode_length"] for r in records])) if records else 0.0,
@@ -193,18 +225,18 @@ def main():
         f"mean_v_y={summary['mean_forward_velocity']:+.3f}  "
         f"-> {out_path}"
     )
-    if any(per_regime[str(k)].get("n_episodes", 0) > 0 for k in (1, 2, 3, 4)):
-        print("       per-regime (bucketed by min_active_count):")
-        for k in (1, 2, 3, 4):
+    if any(per_regime[str(k)].get("n_episodes", 0) > 0 for k in range(MIN_AGENTS, MAX_AGENTS + 1)):
+        print("       per-regime (bucketed by min_n_present):")
+        for k in range(MIN_AGENTS, MAX_AGENTS + 1):
             r = per_regime[str(k)]
             if r.get("n_episodes", 0) == 0:
-                print(f"         active={k}: (none)")
                 continue
             print(
-                f"         active={k}: n={r['n_episodes']:3d}  "
+                f"         n_present={k:2d}: n={r['n_episodes']:3d}  "
                 f"succ={r['success_rate']*100:5.1f}%  "
                 f"mean_v_y={r['mean_forward_velocity']:+.3f}  "
-                f"form_err={r['mean_formation_error']:.3f}"
+                f"form_err={r['mean_formation_error']:.3f}  "
+                f"r_circ={r['mean_circle_radius']:.2f}"
             )
     if renderer:
         renderer.close()
