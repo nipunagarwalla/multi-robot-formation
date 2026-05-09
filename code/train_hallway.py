@@ -31,6 +31,7 @@ from contract import MAX_AGENTS, REWARD_COEFFS
 from env_hallway import FormationHallwayEnv
 from metrics import EpisodeAccumulator, RunLogger
 from model import Agent
+from periodic_eval import evaluate_and_maybe_save_best
 from teleop import RandomTeleop
 
 
@@ -122,7 +123,32 @@ def main():
         default=4,
         help="default n_present after env.reset_at; RandomTeleop may resample if active",
     )
+    # Periodic eval — runs at every checkpoint, scores per regime, updates best.pt
+    ap.add_argument(
+        "--eval-every",
+        type=int,
+        default=None,
+        help="run periodic eval every N iters (defaults to --checkpoint-every; "
+             "set 0 to disable)",
+    )
+    ap.add_argument("--eval-episodes", type=int, default=4,
+                    help="episodes per regime per eval pass")
+    ap.add_argument("--eval-max-steps", type=int, default=None,
+                    help="max env steps per eval episode (defaults to --max-steps)")
+    ap.add_argument(
+        "--eval-n-present-counts",
+        type=str,
+        default="1,4,7,10",
+        help="comma-separated list of n_present values to evaluate at "
+             "(each gets --eval-episodes episodes)",
+    )
     args = ap.parse_args()
+
+    eval_every = args.eval_every if args.eval_every is not None else args.checkpoint_every
+    eval_max_steps = args.eval_max_steps or args.max_steps
+    eval_n_present = [int(x) for x in args.eval_n_present_counts.split(",") if x.strip()]
+    if eval_every and not eval_n_present:
+        raise SystemExit("--eval-n-present-counts must be non-empty if eval is enabled")
 
     config = make_config(num_envs=args.num_envs, max_time_steps=args.max_steps)
     config["seed"] = args.seed
@@ -238,6 +264,9 @@ def main():
 
     iter_lo = start_iteration + 1
     iter_hi = start_iteration + args.iterations + 1
+    best_eval_score: float | None = None
+    best_eval_iter: int | None = None
+    best_eval_per_n: dict | None = None
     for iteration in range(iter_lo, iter_hi):
         obs_per_step = []
         ep_rewards: list = []
@@ -410,8 +439,11 @@ def main():
                     grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm
                 )
 
-        # Active-only mean reward (teleop'd / non-present slots are zero by construction)
-        mean_reward_iter = float(rewards_buf.sum().item()) / max(global_step, 1)
+        # Mean per-env-step reward (sum across robots) — divide by THIS iter's
+        # rollout size, not the cumulative env-step counter. Bug pre-fix the
+        # divisor was global_step which grows monotonically, making the metric
+        # silently shrink across iters even when the policy held steady.
+        mean_reward_per_step = float(rewards_buf.sum().item()) / max(T * nE, 1)
         mean_ep_len = float(np.mean(ep_lengths)) if ep_lengths else float("nan")
         success_rate = (
             float(np.mean(ep_reached_goal)) if ep_reached_goal else float("nan")
@@ -420,6 +452,7 @@ def main():
         def _mean_or_nan(xs):
             return float(np.mean(xs)) if xs else float("nan")
 
+        mean_episode_reward = _mean_or_nan(ep_rewards)
         mean_n_present = _mean_or_nan(ep_n_present)
         mean_form_err = _mean_or_nan(ep_form_err)
         mean_circle_radius = _mean_or_nan(ep_circle_radius)
@@ -438,7 +471,7 @@ def main():
             approx_kl=last_kl,
             clip_frac=last_clip,
             grad_norm=last_grad,
-            mean_reward=mean_reward_iter,
+            mean_reward=mean_reward_per_step,
             mean_episode_length=mean_ep_len,
             lr=config["lr"],
             success_rate=success_rate,
@@ -448,7 +481,8 @@ def main():
             n_episodes=len(ep_rewards),
         )
         print(
-            f"iter {iteration:4d}  rew {mean_reward_iter:+.4f}  "
+            f"iter {iteration:4d}  rew/step {mean_reward_per_step:+.4f}  "
+            f"rew/ep {mean_episode_reward:+8.2f}  "
             f"succ {success_rate*100:5.1f}%  "
             f"pg {last_pg:+.4f}  v {last_vl:.4f}  ent {last_ent:+.3f}  "
             f"kl {last_kl:+.4f}  ep_len {mean_ep_len:.1f}  "
@@ -456,13 +490,55 @@ def main():
             f"r_circ {mean_circle_radius:.2f}"
         )
 
-        if iteration % args.checkpoint_every == 0 or iteration == iter_hi - 1:
+        is_checkpoint = (
+            iteration % args.checkpoint_every == 0 or iteration == iter_hi - 1
+        )
+        if is_checkpoint:
             ckpt = logger.checkpoint_path(iteration)
             save_checkpoint(ckpt, agent, optimizer, iteration)
             logger.update_latest_symlink(ckpt)
 
+            if eval_every and (
+                iteration % eval_every == 0 or iteration == iter_hi - 1
+            ):
+                s, per_n, is_new_best = evaluate_and_maybe_save_best(
+                    agent=agent,
+                    device=device,
+                    logger=logger,
+                    ckpt_path=ckpt,
+                    n_present_list=eval_n_present,
+                    episodes=args.eval_episodes,
+                    max_steps=eval_max_steps,
+                    current_best_score=best_eval_score,
+                    seed=args.seed + iteration,  # vary seed across passes
+                )
+                if is_new_best:
+                    best_eval_score = s
+                    best_eval_iter = iteration
+                    best_eval_per_n = per_n
+                regime_str = "  ".join(
+                    f"n={n}:{r['success_rate']*100:.0f}%/{r['mean_v_y']:+.2f}"
+                    for n, r in per_n.items()
+                )
+                print(
+                    f"  [eval iter {iteration:4d}] score {s:+8.2f}  "
+                    f"{regime_str}  "
+                    f"{'(NEW BEST)' if is_new_best else f'(best={best_eval_score:+.2f}@{best_eval_iter})'}"
+                )
+
     logger.close()
     print(f"[done] last ckpt: {logger.checkpoint_path(iter_hi - 1)}")
+    if best_eval_iter is not None:
+        print(
+            f"[done] best ckpt: weights/best.pt -> weights_epoch{best_eval_iter}.pt  "
+            f"score={best_eval_score:+.2f}"
+        )
+        for n, r in (best_eval_per_n or {}).items():
+            print(
+                f"         n_present={n:2d}: succ={r['success_rate']*100:5.1f}%  "
+                f"v_y={r['mean_v_y']:+.3f}  form={r['mean_form_err']:.3f}  "
+                f"R={r['mean_total_reward']:+.2f}"
+            )
 
 
 if __name__ == "__main__":
