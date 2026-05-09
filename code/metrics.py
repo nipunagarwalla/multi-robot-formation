@@ -18,7 +18,6 @@ import os
 import platform
 import socket
 import subprocess
-from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -36,16 +35,12 @@ ITER_COLUMNS: List[str] = [
     "mean_reward",
     "mean_episode_length",
     "lr",
-    # success / regime breakdown — populated per iteration from finished episodes
+    # success / aggregate breakdown — populated per iteration from finished episodes
     "success_rate",
-    "formation_error_active_1",
-    "formation_error_active_2",
-    "formation_error_active_3",
-    "formation_error_active_4",
-    "n_episodes_active_1",
-    "n_episodes_active_2",
-    "n_episodes_active_3",
-    "n_episodes_active_4",
+    "mean_n_present",
+    "mean_formation_error",
+    "mean_circle_radius",
+    "n_episodes",
 ]
 
 
@@ -162,9 +157,14 @@ class EpisodeAccumulator:
         self.num_teleop_grabs = 0
         self.max_active = 0
         self.min_active = self.n_agents
+        self.max_n_present = 0
+        self.min_n_present = self.n_agents
+        self.n_present_sum = 0
+        self.n_present_count = 0
         self.formation_err_sum = 0.0
         self.formation_err_count = 0
-        self.formation_err_by_active: Dict[int, List[float]] = defaultdict(list)
+        self.circle_radius_sum = 0.0
+        self.circle_radius_count = 0
         self.fwd_velocity_sum = 0.0
         self.fwd_velocity_count = 0
         self.stall_steps = 0
@@ -175,7 +175,9 @@ class EpisodeAccumulator:
         per_agent_rewards: Iterable[float],
         active_count: int,
         teleop_mask: Iterable[float],
+        n_present: int,
         formation_err: Optional[float] = None,
+        circle_radius: Optional[float] = None,
         fwd_velocity: Optional[float] = None,
         stalled: bool = False,
         had_collision: bool = False,
@@ -190,10 +192,16 @@ class EpisodeAccumulator:
             self.num_wall_hits += 1
         self.max_active = max(self.max_active, active_count)
         self.min_active = min(self.min_active, active_count)
+        self.max_n_present = max(self.max_n_present, n_present)
+        self.min_n_present = min(self.min_n_present, n_present)
+        self.n_present_sum += n_present
+        self.n_present_count += 1
         if formation_err is not None and active_count >= 2:
             self.formation_err_sum += formation_err
             self.formation_err_count += 1
-            self.formation_err_by_active[active_count].append(formation_err)
+        if circle_radius is not None and circle_radius > 0:
+            self.circle_radius_sum += circle_radius
+            self.circle_radius_count += 1
         if fwd_velocity is not None:
             self.fwd_velocity_sum += fwd_velocity
             self.fwd_velocity_count += 1
@@ -208,10 +216,6 @@ class EpisodeAccumulator:
         self.last_teleop_mask = m
 
     def emit(self, iteration: int, env_id: int, reached_goal: bool) -> Dict[str, Any]:
-        per_active = {
-            str(k): float(sum(v) / max(len(v), 1))
-            for k, v in self.formation_err_by_active.items()
-        }
         out = {
             "iter": iteration,
             "env_id": env_id,
@@ -223,10 +227,15 @@ class EpisodeAccumulator:
             "num_teleop_grabs": self.num_teleop_grabs,
             "max_active_count": self.max_active,
             "min_active_count": self.min_active,
+            "max_n_present": self.max_n_present,
+            "min_n_present": self.min_n_present,
+            "mean_n_present": self.n_present_sum / max(self.n_present_count, 1),
             "formation_error_mean": (
                 self.formation_err_sum / max(self.formation_err_count, 1)
             ),
-            "formation_error_per_active_count": per_active,
+            "circle_radius_mean": (
+                self.circle_radius_sum / max(self.circle_radius_count, 1)
+            ),
             "forward_velocity_mean": (
                 self.fwd_velocity_sum / max(self.fwd_velocity_count, 1)
             ),
