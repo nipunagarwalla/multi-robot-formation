@@ -120,13 +120,17 @@ class RunLogger:
     def checkpoint_path(self, iteration: int) -> str:
         return os.path.join(self.weights_dir, f"weights_epoch{iteration}.pt")
 
-    def update_latest_symlink(self, ckpt_path: str):
-        link = os.path.join(self.weights_dir, "latest.pt")
+    def update_named_symlink(self, name: str, ckpt_path: str):
+        """Atomically point weights/<name> at `ckpt_path` (e.g. latest.pt, best.pt)."""
+        link = os.path.join(self.weights_dir, name)
         if os.path.islink(link) or os.path.exists(link):
             os.remove(link)
-        # Use relative target so the symlink survives a moved runs/ tree
+        # Relative target so the symlink survives a moved runs/ tree
         rel = os.path.relpath(ckpt_path, self.weights_dir)
         os.symlink(rel, link)
+
+    def update_latest_symlink(self, ckpt_path: str):
+        self.update_named_symlink("latest.pt", ckpt_path)
 
     def close(self):
         if self._iter_fh is not None:
