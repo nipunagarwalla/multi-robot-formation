@@ -1,13 +1,12 @@
 """PPO trainer for FormationHallwayEnv with random-teleop disturbance.
 
-Mirrors code/train.py but adapts for:
-  - dynamic active-cluster size (4 -> square, 3 -> tri, 2 -> line)
-  - teleop_mask + present_mask in the observation
-  - loss masking so gradients flow only through policy-controlled robots
-  - persistent metrics via RunLogger (config.json + iterations.csv + episodes.jsonl)
+Trains a single shared GNN policy that controls a dynamic-size cluster
+(1..MAX_AGENTS robots) in an 8x8 m square arena. The cluster always
+targets a circle whose radius scales with the active count.
 
-Run:
-  python code/train_hallway.py --iterations 200 --tag hallway-v0
+Loss is masked by `present_mask * (1 - teleop_mask)` so gradients flow
+only through robots that are (a) actually in the world and (b) under
+policy control.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from checkpoint import load_checkpoint, save_checkpoint
-from contract import REWARD_COEFFS
+from contract import MAX_AGENTS, REWARD_COEFFS
 from env_hallway import FormationHallwayEnv
 from metrics import EpisodeAccumulator, RunLogger
 from model import Agent
@@ -39,21 +38,21 @@ def make_config(num_envs: int, max_time_steps: int) -> dict:
     return {
         "seed": 0,
         "clip_param": 0.2,
-        "entropy_coeff": 0.001,
+        "entropy_coeff": 0.01,
         "vf_clip_param": 1.0,
-        "vf_loss_coeff": 1.0,
-        "max_grad_norm": 0.5,
+        "vf_loss_coeff": 0.5,
+        "max_grad_norm": 1.0,
         "norm_adv": True,
         "clip_vloss": True,
         "num_sgd_iter": 8,
-        "lr": 5e-5,
+        "lr": 1e-4,
         "gamma": 0.995,
         "lambda": 0.95,
         "model": {
             "custom_model_config": {
                 "activation": "relu",
                 "msg_features": 32,
-                "comm_range": 2.0,
+                "comm_range": 4.0,
                 "use_masks": True,
             },
         },
@@ -66,17 +65,31 @@ def make_config(num_envs: int, max_time_steps: int) -> dict:
         "teleop": {
             "p_grab": 0.005,
             "p_release": 0.01,
+            "p_spawn": 0.002,
+            "p_delete": 0.002,
             "drift_speed": 0.6,
+            "init_n_present_dist": None,  # None -> teleop.DEFAULT_INIT_N_PRESENT_DIST
         },
     }
+
+
+def _parse_dist(s: str | None):
+    if s is None:
+        return None
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if len(parts) != MAX_AGENTS:
+        raise ValueError(
+            f"--init-n-present-dist must be {MAX_AGENTS} comma-separated weights; got {len(parts)}"
+        )
+    return [float(p) for p in parts]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iterations", type=int, default=50)
-    ap.add_argument("--tag", type=str, default="hallway-v0")
+    ap.add_argument("--tag", type=str, default="circle-v1")
     ap.add_argument("--num-envs", type=int, default=8)
-    ap.add_argument("--max-steps", type=int, default=400)
+    ap.add_argument("--max-steps", type=int, default=600)
     ap.add_argument("--checkpoint-every", type=int, default=20)
     ap.add_argument(
         "--no-teleop",
@@ -91,10 +104,45 @@ def main():
         help="path to a .pt checkpoint to resume from "
         "(continues iteration numbering, restores optimizer state)",
     )
+    ap.add_argument("--lr", type=float, default=None, help="override LR")
+    ap.add_argument("--entropy-coeff", type=float, default=None, help="override entropy coeff")
+    ap.add_argument("--p-grab", type=float, default=None)
+    ap.add_argument("--p-release", type=float, default=None)
+    ap.add_argument("--p-spawn", type=float, default=None)
+    ap.add_argument("--p-delete", type=float, default=None)
+    ap.add_argument(
+        "--init-n-present-dist",
+        type=str,
+        default=None,
+        help=f"comma-separated {MAX_AGENTS} weights for sampling initial n_present at reset",
+    )
+    ap.add_argument(
+        "--initial-agents",
+        type=int,
+        default=4,
+        help="default n_present after env.reset_at; RandomTeleop may resample if active",
+    )
     args = ap.parse_args()
 
     config = make_config(num_envs=args.num_envs, max_time_steps=args.max_steps)
     config["seed"] = args.seed
+    if args.lr is not None:
+        config["lr"] = args.lr
+    if args.entropy_coeff is not None:
+        config["entropy_coeff"] = args.entropy_coeff
+    for k, v in (
+        ("p_grab", args.p_grab),
+        ("p_release", args.p_release),
+        ("p_spawn", args.p_spawn),
+        ("p_delete", args.p_delete),
+    ):
+        if v is not None:
+            config["teleop"][k] = v
+    init_dist = _parse_dist(args.init_n_present_dist)
+    if init_dist is not None:
+        config["teleop"]["init_n_present_dist"] = init_dist
+    config["env_config"]["initial_agents"] = args.initial_agents
+
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -135,7 +183,10 @@ def main():
             env,
             p_grab=config["teleop"]["p_grab"],
             p_release=config["teleop"]["p_release"],
+            p_spawn=config["teleop"]["p_spawn"],
+            p_delete=config["teleop"]["p_delete"],
             drift_speed=config["teleop"]["drift_speed"],
+            init_n_present_dist=config["teleop"]["init_n_present_dist"],
             seed=args.seed,
         )
     )
@@ -164,7 +215,7 @@ def main():
 
     # --- buffer allocation ---------------------------------------------
     nE = env.cfg["num_envs"]
-    nA = env.cfg["n_agents"]
+    nA = env.cfg["n_agents"]   # always MAX_AGENTS
     T = env.cfg["max_time_steps"]
     actions_buf = torch.zeros((T, nE, nA, 2), device=device)
     logprobs_buf = torch.zeros((T, nE, nA), device=device)
@@ -172,6 +223,7 @@ def main():
     dones_buf = torch.zeros((T, nE), device=device)
     values_buf = torch.zeros((T, nE, nA), device=device)
     teleop_buf = torch.zeros((T, nE, nA), device=device)
+    present_buf = torch.zeros((T, nE, nA), device=device)
 
     next_obs = env.vector_reset()
     if teleop is not None:
@@ -191,9 +243,9 @@ def main():
         ep_rewards: list = []
         ep_lengths: list = []
         ep_reached_goal: list = []
-        # accumulate per-active-count formation errors across all episodes
-        # finished during this iteration
-        ep_form_err_by_active: dict = {1: [], 2: [], 3: [], 4: []}
+        ep_n_present: list = []        # mean n_present per finished episode
+        ep_form_err: list = []         # mean formation_err per finished episode
+        ep_circle_radius: list = []    # mean circle_radius per finished episode
 
         for step in range(T):
             global_step += nE
@@ -202,6 +254,9 @@ def main():
             dones_buf[step] = next_done
             teleop_buf[step] = torch.as_tensor(
                 [o["teleop_mask"] for o in next_obs], dtype=torch.float32, device=device
+            )
+            present_buf[step] = torch.as_tensor(
+                [o["present_mask"] for o in next_obs], dtype=torch.float32, device=device
             )
 
             with torch.no_grad():
@@ -223,7 +278,9 @@ def main():
                     per_agent_rewards=per_agent[e].tolist(),
                     active_count=int(infos[e]["active_count"]),
                     teleop_mask=next_obs[e]["teleop_mask"],
+                    n_present=int(infos[e]["n_present"]),
                     formation_err=infos[e]["formation_error"],
+                    circle_radius=float(infos[e].get("circle_radius", 0.0)),
                     fwd_velocity=float(infos[e]["fwd_velocity"]),
                     stalled=bool(infos[e]["stalled"]),
                     had_collision=bool(infos[e]["collided"]),
@@ -237,16 +294,16 @@ def main():
                     ep_rewards.append(accs[e].total_reward)
                     ep_lengths.append(accs[e].length)
                     ep_reached_goal.append(bool(infos[e]["goal_reached"]))
-                    for k, v in accs[e].formation_err_by_active.items():
-                        if k in ep_form_err_by_active and v:
-                            ep_form_err_by_active[k].extend(v)
-                    logger.log_episode(
-                        accs[e].emit(
-                            iteration=iteration,
-                            env_id=e,
-                            reached_goal=bool(infos[e]["goal_reached"]),
-                        )
+                    rec = accs[e].emit(
+                        iteration=iteration,
+                        env_id=e,
+                        reached_goal=bool(infos[e]["goal_reached"]),
                     )
+                    ep_n_present.append(rec["mean_n_present"])
+                    ep_form_err.append(rec["formation_error_mean"])
+                    if rec["circle_radius_mean"] > 0:
+                        ep_circle_radius.append(rec["circle_radius_mean"])
+                    logger.log_episode(rec)
                     accs[e].reset()
                     env.reset_at(e)
                     if teleop is not None:
@@ -303,8 +360,8 @@ def main():
                 if config["norm_adv"]:
                     mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
 
-                # Active-mask: only policy-controlled robots contribute to the loss
-                active = 1.0 - teleop_buf[mb_t]  # (nE, nA)
+                # Active mask: only present, policy-controlled robots contribute
+                active = present_buf[mb_t] * (1.0 - teleop_buf[mb_t])
                 norm = active.sum().clamp(min=1.0)
 
                 pg_loss1 = -mb_adv * ratio
@@ -353,7 +410,7 @@ def main():
                     grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm
                 )
 
-        # Active-only mean reward (teleop'd slots are zero by construction)
+        # Active-only mean reward (teleop'd / non-present slots are zero by construction)
         mean_reward_iter = float(rewards_buf.sum().item()) / max(global_step, 1)
         mean_ep_len = float(np.mean(ep_lengths)) if ep_lengths else float("nan")
         success_rate = (
@@ -363,11 +420,9 @@ def main():
         def _mean_or_nan(xs):
             return float(np.mean(xs)) if xs else float("nan")
 
-        per_active_mean = {
-            k: _mean_or_nan(ep_form_err_by_active.get(k, []))
-            for k in (1, 2, 3, 4)
-        }
-        per_active_n = {k: len(ep_form_err_by_active.get(k, [])) for k in (1, 2, 3, 4)}
+        mean_n_present = _mean_or_nan(ep_n_present)
+        mean_form_err = _mean_or_nan(ep_form_err)
+        mean_circle_radius = _mean_or_nan(ep_circle_radius)
 
         wall = time.time() - start_time
         logger.log_iter(
@@ -387,23 +442,18 @@ def main():
             mean_episode_length=mean_ep_len,
             lr=config["lr"],
             success_rate=success_rate,
-            formation_error_active_1=per_active_mean[1],
-            formation_error_active_2=per_active_mean[2],
-            formation_error_active_3=per_active_mean[3],
-            formation_error_active_4=per_active_mean[4],
-            n_episodes_active_1=per_active_n[1],
-            n_episodes_active_2=per_active_n[2],
-            n_episodes_active_3=per_active_n[3],
-            n_episodes_active_4=per_active_n[4],
+            mean_n_present=mean_n_present,
+            mean_formation_error=mean_form_err,
+            mean_circle_radius=mean_circle_radius,
+            n_episodes=len(ep_rewards),
         )
         print(
             f"iter {iteration:4d}  rew {mean_reward_iter:+.4f}  "
             f"succ {success_rate*100:5.1f}%  "
             f"pg {last_pg:+.4f}  v {last_vl:.4f}  ent {last_ent:+.3f}  "
             f"kl {last_kl:+.4f}  ep_len {mean_ep_len:.1f}  "
-            f"form[1/2/3/4]="
-            f"{per_active_mean[1]:.3f}/{per_active_mean[2]:.3f}/"
-            f"{per_active_mean[3]:.3f}/{per_active_mean[4]:.3f}"
+            f"n_pres {mean_n_present:.2f}  form {mean_form_err:.3f}  "
+            f"r_circ {mean_circle_radius:.2f}"
         )
 
         if iteration % args.checkpoint_every == 0 or iteration == iter_hi - 1:
