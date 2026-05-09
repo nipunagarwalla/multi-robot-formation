@@ -1,7 +1,17 @@
 """Interactive demo: trained policy + keyboard teleop in a pygame window.
 
-Press 1-4 to toggle teleop on each robot, WASD to drive the most-recently
-selected one, 0 to release all. ESC or window-close to quit.
+Up to 10 robots in an 8 m x 8 m square arena, always forming a circle and
+heading north toward the goal line.
+
+Keys:
+  1-9        toggle teleop on robot 1-9
+  0          toggle teleop on robot 10
+  W A S D    drive the most-recently-selected teleop robot
+  Z / X      decrease / increase teleop drive speed (0.25 m/s steps)
+  =  / +     spawn a new robot (no-op at MAX_AGENTS)
+  -  / _     delete the selected (or highest-index) robot (no-op at MIN_AGENTS=1)
+  R          release all teleop'd robots
+  ESC        quit
 
 Usage:
   python code/run_demo.py --weights runs/<ts>/weights/latest.pt
@@ -32,7 +42,7 @@ def _build_agent(env, device):
             "custom_model_config": {
                 "activation": "relu",
                 "msg_features": 32,
-                "comm_range": 2.0,
+                "comm_range": 4.0,
                 "use_masks": True,
             }
         }
@@ -70,7 +80,8 @@ def main():
     total_r = 0.0
     step = 0
     running = True
-    print("[demo] keys: 1-4 toggle teleop · WASD drive · 0 release · ESC quit")
+    print("[demo] keys: 1-9/0 toggle teleop · WASD drive · Z/X speed · "
+          "=/- spawn/delete · R release · ESC quit")
 
     while running:
         for ev in pygame.event.get():
@@ -94,7 +105,8 @@ def main():
         total_r += float(r[0])
         step += 1
 
-        renderer.render(env, env_idx=0, episode_step=step, total_reward=total_r)
+        renderer.render(env, env_idx=0, episode_step=step, total_reward=total_r,
+                        drive_speed=teleop.drive_speed)
         clock.tick(int(1 / env.cfg["dt"]))
 
         if done[0]:
