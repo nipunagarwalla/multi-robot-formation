@@ -1,17 +1,19 @@
-"""Pygame renderer for FormationHallwayEnv.
+"""Pygame renderer for FormationHallwayEnv (8 m x 8 m square arena).
 
-Top-down view of a tall vertical hallway. World +y is "forward" so screen
-+y is inverted. Drawn elements:
-  - hallway walls (left/right) drawn as thick filled rectangles
-  - distance ticks every 1 m along the inside of the walls
+Top-down view. World +y is "forward" so screen +y is inverted. Drawn
+elements:
+  - arena floor + four wall rectangles
+  - distance ticks every 1 m along the bottom and left walls
   - spawn line (blue) at SPAWN_Y, goal line (green) at GOAL_Y
-  - 4 colored circles (one per robot), with TELEOP rings on overridden robots
-  - target-formation outline (faded) at the active-cluster centroid
-  - thin line from each policy-controlled robot to its assigned slot
-  - HUD in the left margin panel (outside the hallway)
+  - up to 10 colored circles (one per present robot), with red TELEOP rings
+    on overridden robots and a "T" label above
+  - target-formation outline (faded circle of n_active slots) at the active
+    centroid, with thin assignment lines from each policy-controlled robot
+  - HUD in the left margin showing n_present / n_active / n_teleop, the
+    current step + reward, and key bindings.
 
-Defaults to fullscreen so the hallway fills the screen vertically. Opt out
-with HallwayRenderer(fullscreen=False) for headless self-tests.
+Defaults to fullscreen so the arena fills the window. Opt out with
+HallwayRenderer(fullscreen=False) for headless self-tests.
 """
 from __future__ import annotations
 
@@ -29,8 +31,8 @@ if __package__ in (None, ""):
 
 from contract import (
     AGENT_RADIUS,
+    CIRCLE_SIDE,
     DEFAULT_RENDER_PX_PER_M,
-    FORMATION_SCALE,
     GOAL_Y,
     SPAWN_Y,
     WORLD_H,
@@ -39,10 +41,10 @@ from contract import (
 from env_hallway import FormationHallwayEnv, target_formation_positions
 
 
-BG_OUTSIDE = (24, 24, 28)        # dark frame around the hallway
-BG_INSIDE = (245, 245, 245)      # hallway floor
-WALL = (40, 40, 40)              # filled wall rectangles
-WALL_HIGHLIGHT = (180, 180, 190) # thin inner edge
+BG_OUTSIDE = (24, 24, 28)
+BG_INSIDE = (245, 245, 245)
+WALL = (40, 40, 40)
+WALL_HIGHLIGHT = (180, 180, 190)
 TICK = (140, 140, 150)
 TICK_LABEL = (90, 90, 100)
 GOAL = (0, 170, 0)
@@ -55,10 +57,16 @@ HUD = (235, 235, 240)
 HUD_DIM = (160, 160, 170)
 BLACK = (10, 10, 10)
 ROBOT_COLORS = [
-    (50, 110, 200),   # blue
-    (210, 130, 30),   # orange
-    (30, 170, 80),    # green
-    (190, 60, 190),   # magenta
+    (50, 110, 200),   # 1 blue
+    (210, 130, 30),   # 2 orange
+    (30, 170, 80),    # 3 green
+    (190, 60, 190),   # 4 magenta
+    (200, 50, 50),    # 5 red
+    (60, 180, 200),   # 6 cyan
+    (200, 180, 30),   # 7 yellow
+    (130, 80, 50),    # 8 brown
+    (140, 100, 200),  # 9 purple
+    (90, 90, 90),     # 10 grey
 ]
 
 
@@ -78,17 +86,15 @@ class HallwayRenderer:
         self.world_h = world_h
         self.agent_radius = agent_radius
         self.fullscreen = fullscreen
-        # only used when fullscreen=False; pygame picks display size in fullscreen mode
         self._fallback_px = px_per_m
         self._windowed_size = windowed_size
-        # filled by init()
         self.px = px_per_m
         self.screen_w = world_w * px_per_m
         self.screen_h = world_h * px_per_m
-        self.hall_left_px = 0     # x-pixel of left wall inner edge
-        self.hall_right_px = 0    # x-pixel of right wall inner edge
-        self.hall_top_px = 0      # y-pixel of hallway top edge
-        self.hall_bottom_px = 0   # y-pixel of hallway bottom edge
+        self.arena_left_px = 0
+        self.arena_right_px = 0
+        self.arena_top_px = 0
+        self.arena_bottom_px = 0
         self.surface: Optional[pygame.Surface] = None
         self.font_hud: Optional[pygame.font.Font] = None
         self.font_tick: Optional[pygame.font.Font] = None
@@ -113,15 +119,16 @@ class HallwayRenderer:
             self.surface = pygame.display.set_mode(size)
             self.screen_w, self.screen_h = size
 
-        # pick px_per_m so the hallway fills 92% of vertical space
-        self.px = max(8, int(self.screen_h * 0.92 / self.world_h))
-        hall_w_px = int(self.world_w * self.px)
-        hall_h_px = int(self.world_h * self.px)
-        # center horizontally, near top vertically (with HUD margin both sides)
-        self.hall_left_px = (self.screen_w - hall_w_px) // 2
-        self.hall_right_px = self.hall_left_px + hall_w_px
-        self.hall_top_px = (self.screen_h - hall_h_px) // 2
-        self.hall_bottom_px = self.hall_top_px + hall_h_px
+        # Pick px_per_m so the arena fits in 92% of the smaller axis (square arena).
+        smaller = min(self.screen_w, self.screen_h)
+        self.px = max(8, int(smaller * 0.92 / max(self.world_w, self.world_h)))
+        arena_w_px = int(self.world_w * self.px)
+        arena_h_px = int(self.world_h * self.px)
+        # center both ways
+        self.arena_left_px = (self.screen_w - arena_w_px) // 2
+        self.arena_right_px = self.arena_left_px + arena_w_px
+        self.arena_top_px = (self.screen_h - arena_h_px) // 2
+        self.arena_bottom_px = self.arena_top_px + arena_h_px
 
         self.font_hud = pygame.font.Font(None, 28)
         self.font_tick = pygame.font.Font(None, 18)
@@ -132,40 +139,37 @@ class HallwayRenderer:
     def w2s(self, p) -> Tuple[int, int]:
         """world (x, y) -> screen pixel. World +y is up; screen +y is down."""
         x, y = float(p[0]), float(p[1])
-        sx = self.hall_left_px + int((x + self.world_w / 2) * self.px)
-        sy = self.hall_top_px + int((self.world_h / 2 - y) * self.px)
+        sx = self.arena_left_px + int((x + self.world_w / 2) * self.px)
+        sy = self.arena_top_px + int((self.world_h / 2 - y) * self.px)
         return sx, sy
 
     # ---- drawing pieces --------------------------------------------------
     def _draw_frame(self, surf):
         surf.fill(BG_OUTSIDE)
-        # hallway floor
-        floor = pygame.Rect(self.hall_left_px, self.hall_top_px,
-                            self.hall_right_px - self.hall_left_px,
-                            self.hall_bottom_px - self.hall_top_px)
+        floor = pygame.Rect(self.arena_left_px, self.arena_top_px,
+                            self.arena_right_px - self.arena_left_px,
+                            self.arena_bottom_px - self.arena_top_px)
         pygame.draw.rect(surf, BG_INSIDE, floor)
 
-        wall_thick = max(8, int(self.px * 0.12))
-        # left wall (sits OUTSIDE the floor so the inner edge is exact)
-        left_wall = pygame.Rect(self.hall_left_px - wall_thick, self.hall_top_px,
-                                wall_thick, self.hall_bottom_px - self.hall_top_px)
-        right_wall = pygame.Rect(self.hall_right_px, self.hall_top_px,
-                                 wall_thick, self.hall_bottom_px - self.hall_top_px)
-        pygame.draw.rect(surf, WALL, left_wall)
-        pygame.draw.rect(surf, WALL, right_wall)
-        # 1-px highlight on the inner edge of each wall to emphasize the boundary
-        pygame.draw.line(surf, WALL_HIGHLIGHT,
-                         (self.hall_left_px, self.hall_top_px),
-                         (self.hall_left_px, self.hall_bottom_px), 1)
-        pygame.draw.line(surf, WALL_HIGHLIGHT,
-                         (self.hall_right_px - 1, self.hall_top_px),
-                         (self.hall_right_px - 1, self.hall_bottom_px), 1)
+        wall_thick = max(8, int(self.px * 0.05))
+        # four walls — sit OUTSIDE the floor so the inner edge is exact
+        left = pygame.Rect(self.arena_left_px - wall_thick, self.arena_top_px - wall_thick,
+                           wall_thick, self.arena_bottom_px - self.arena_top_px + 2 * wall_thick)
+        right = pygame.Rect(self.arena_right_px, self.arena_top_px - wall_thick,
+                            wall_thick, self.arena_bottom_px - self.arena_top_px + 2 * wall_thick)
+        top = pygame.Rect(self.arena_left_px - wall_thick, self.arena_top_px - wall_thick,
+                          self.arena_right_px - self.arena_left_px + 2 * wall_thick, wall_thick)
+        bottom = pygame.Rect(self.arena_left_px - wall_thick, self.arena_bottom_px,
+                             self.arena_right_px - self.arena_left_px + 2 * wall_thick, wall_thick)
+        for w in (left, right, top, bottom):
+            pygame.draw.rect(surf, WALL, w)
+        # 1-px highlight on the inner edge
+        pygame.draw.rect(surf, WALL_HIGHLIGHT, floor, 1)
 
     def _draw_ticks(self, surf):
         if self.font_tick is None:
             return
         tick_len = max(8, int(self.px * 0.10))
-        # ticks every integer y in [-world_h/2, +world_h/2]
         y_min = -int(self.world_h // 2)
         y_max = int(self.world_h // 2)
         for y in range(y_min, y_max + 1):
@@ -174,11 +178,15 @@ class HallwayRenderer:
             pygame.draw.line(surf, TICK, (sx_l, sy), (sx_l + tick_len, sy), 1)
             pygame.draw.line(surf, TICK, (sx_r - tick_len, sy), (sx_r, sy), 1)
             label = self.font_tick.render(f"{y:+d} m", True, TICK_LABEL)
-            # left tick label sits just outside the wall in the dark frame
-            surf.blit(label, (self.hall_left_px - label.get_width() - 14, sy - 8))
+            surf.blit(label, (self.arena_left_px - label.get_width() - 14, sy - 8))
+        x_min = -int(self.world_w // 2)
+        x_max = int(self.world_w // 2)
+        for x in range(x_min, x_max + 1):
+            sx, sy_t = self.w2s((float(x), self.world_h / 2))
+            _, sy_b = self.w2s((float(x), -self.world_h / 2))
+            pygame.draw.line(surf, TICK, (sx, sy_b - tick_len), (sx, sy_b), 1)
 
     def _draw_lines_of_interest(self, surf):
-        # spawn line (blue)
         sx_l, sy = self.w2s((-self.world_w / 2, SPAWN_Y))
         sx_r, _ = self.w2s((self.world_w / 2, SPAWN_Y))
         pygame.draw.line(surf, SPAWN, (sx_l, sy), (sx_r, sy), 4)
@@ -186,7 +194,6 @@ class HallwayRenderer:
             lbl = self.font_label.render("SPAWN", True, SPAWN_LABEL)
             surf.blit(lbl, (sx_r + 12, sy - 10))
 
-        # goal line (green)
         sx_l, sy = self.w2s((-self.world_w / 2, GOAL_Y))
         sx_r, _ = self.w2s((self.world_w / 2, GOAL_Y))
         pygame.draw.line(surf, GOAL, (sx_l, sy), (sx_r, sy), 4)
@@ -203,15 +210,23 @@ class HallwayRenderer:
         cost = np.linalg.norm(ps_active[:, None, :] - slots_world[None, :, :], axis=-1)
         row, col = linear_sum_assignment(cost)
         slot_radius = max(2, int(self.agent_radius * self.px * 1.05))
+        # faint full-circle outline so the user sees the target shape even
+        # before assignments are read
+        cx, cy = self.w2s(centroid)
+        if k >= 3:
+            r_world = scale / (2.0 * np.sin(np.pi / k))
+            pygame.draw.circle(surf, SLOT, (cx, cy), int(r_world * self.px), 1)
         for ri, ci in zip(row, col):
             sx, sy = self.w2s(slots_world[ci])
             pygame.draw.circle(surf, SLOT, (sx, sy), slot_radius, 2)
         for ri, ci in zip(row, col):
             pygame.draw.line(surf, SLOT, self.w2s(ps_active[ri]), self.w2s(slots_world[ci]), 1)
 
-    def _draw_robots(self, surf, ps: np.ndarray, teleop_mask: np.ndarray):
+    def _draw_robots(self, surf, ps: np.ndarray, teleop_mask: np.ndarray, present_mask: np.ndarray):
         r_px = max(4, int(self.agent_radius * self.px))
         for i, p in enumerate(ps):
+            if float(present_mask[i]) < 0.5:
+                continue  # skip non-present (parked at sentinel anyway)
             color = ROBOT_COLORS[i % len(ROBOT_COLORS)]
             sx, sy = self.w2s(p)
             pygame.draw.circle(surf, color, (sx, sy), r_px)
@@ -221,25 +236,29 @@ class HallwayRenderer:
                     lbl = self.font_label.render("T", True, TELEOP_RING)
                     surf.blit(lbl, (sx - 4, sy - r_px - 18))
             if self.font_label:
-                idx = self.font_label.render(str(i + 1), True, BLACK)
+                idx = self.font_label.render(str(i + 1) if i < 9 else "0", True, BLACK)
                 surf.blit(idx, (sx + r_px + 4, sy - 10))
 
-    def _draw_hud(self, surf, active_count: int, episode_step: int, total_reward: float):
+    def _draw_hud(self, surf, *, n_present: int, n_active: int, n_teleop: int,
+                  episode_step: int, total_reward: float, drive_speed: float):
         if self.font_hud is None:
             return
-        # left margin panel — anchored to the dark frame, never on the floor
-        panel_x = max(12, self.hall_left_px - 240)
+        panel_x = max(12, self.arena_left_px - 240)
         lines = [
             ("FormationHallway", HUD),
-            (f"active = {active_count}", HUD),
-            (f"step   = {episode_step}", HUD_DIM),
-            (f"reward = {total_reward:+.2f}", HUD_DIM),
+            (f"present = {n_present}", HUD),
+            (f"active  = {n_active}", HUD),
+            (f"teleop  = {n_teleop}", HUD),
+            (f"step    = {episode_step}", HUD_DIM),
+            (f"reward  = {total_reward:+.2f}", HUD_DIM),
+            (f"drive   = {drive_speed:.2f} m/s", HUD_DIM),
             ("", HUD_DIM),
-            ("1/2/3/4 toggle teleop", HUD_DIM),
-            ("WASD drive  ·  0 release", HUD_DIM),
+            ("1-9 / 0 toggle teleop", HUD_DIM),
+            ("WASD drive  ·  Z / X speed", HUD_DIM),
+            ("= spawn   -  delete   R release", HUD_DIM),
             ("ESC quit", HUD_DIM),
         ]
-        y = self.hall_top_px
+        y = self.arena_top_px
         for text, color in lines:
             if text:
                 surf.blit(self.font_hud.render(text, True, color), (panel_x, y))
@@ -252,7 +271,8 @@ class HallwayRenderer:
         env_idx: int = 0,
         episode_step: int = 0,
         total_reward: float = 0.0,
-        formation_scale: float = FORMATION_SCALE,
+        circle_side: float = CIRCLE_SIDE,
+        drive_speed: float = 1.0,
     ):
         if self.surface is None:
             self.init()
@@ -261,13 +281,21 @@ class HallwayRenderer:
         self._draw_lines_of_interest(self.surface)
         ps = env.ps[env_idx].detach().cpu().numpy()
         teleop = env.teleop_mask[env_idx].detach().cpu().numpy()
-        active_idx = np.where(teleop < 0.5)[0]
+        present = env.present_mask[env_idx].detach().cpu().numpy()
+        active_idx = np.where((present > 0.5) & (teleop < 0.5))[0]
         ps_active = ps[active_idx]
         self._draw_formation_overlay(self.surface, ps_active, k=len(active_idx),
-                                     scale=formation_scale)
-        self._draw_robots(self.surface, ps, teleop)
-        self._draw_hud(self.surface, active_count=len(active_idx),
-                       episode_step=episode_step, total_reward=total_reward)
+                                     scale=circle_side)
+        self._draw_robots(self.surface, ps, teleop, present)
+        self._draw_hud(
+            self.surface,
+            n_present=int(present.sum()),
+            n_active=len(active_idx),
+            n_teleop=int(teleop.sum()),
+            episode_step=episode_step,
+            total_reward=total_reward,
+            drive_speed=drive_speed,
+        )
         pygame.display.flip()
 
     def close(self):
@@ -278,23 +306,34 @@ class HallwayRenderer:
 
 
 def _self_test():
-    """Render n in {4,3,2,1} with hardcoded poses to a stitched png."""
-    env = FormationHallwayEnv({"num_envs": 1})
+    """Render n_present in a few values to a stitched png for visual check."""
+    env = FormationHallwayEnv({"num_envs": 1, "initial_agents": 4})
     env.vector_reset()
-    r = HallwayRenderer(fullscreen=False, windowed_size=(800, 1000))
+    r = HallwayRenderer(fullscreen=False, windowed_size=(900, 900))
     r.init(headless=True)
     out_path = os.path.join(os.path.dirname(__file__), "..", "render_self_test.png")
     out_path = os.path.abspath(out_path)
     frames = []
-    for n_active in (4, 3, 2, 1):
+    for n_target in (4, 7, 10, 2, 1):
         env.vector_reset()
-        ps = torch.zeros(env.cfg["n_agents"], 2)
-        for i in range(env.cfg["n_agents"]):
-            ps[i] = torch.tensor([(-0.3 + 0.2 * i), 0.0])
+        cur = env.n_present(0)
+        while cur < n_target:
+            env.spawn(0)
+            cur += 1
+        while cur > n_target:
+            # delete from highest index
+            for i in range(env.cfg["n_agents"] - 1, -1, -1):
+                if float(env.present_mask[0, i]) > 0.5:
+                    if env.delete(0, i):
+                        cur -= 1
+                    break
+        # place all present robots in target circle for a clean visual
+        slots = target_formation_positions(n_target)
+        ps = env.ps[0].clone()
+        present_idx = [i for i in range(env.cfg["n_agents"]) if float(env.present_mask[0, i]) > 0.5]
+        for slot_i, robot_i in enumerate(present_idx):
+            ps[robot_i] = slots[slot_i]
         env.ps[0] = ps
-        for i in range(n_active, env.cfg["n_agents"]):
-            env.set_teleop(0, i, True)
-            env.set_teleop_action(0, i, np.array([0.0, 0.0]))
         r.render(env, env_idx=0, episode_step=0, total_reward=0.0)
         arr = pygame.surfarray.array3d(r.surface).swapaxes(0, 1)
         frames.append(arr)
