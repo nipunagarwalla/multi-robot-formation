@@ -167,11 +167,24 @@ def is_deployable(summary: dict, t: run_status.Thresholds) -> bool:
 
 
 def end_session(session_dir: str, state: dict, *, reason: str, event: str = "STOPPED"):
+    """Mark the session stopped. Kills any still-running trainer first so we
+    don't leak an orphan subprocess past the budget."""
+    cur = state.get("current_run") or {}
+    cur_pid = cur.get("pid")
+    kill_result = None
+    if cur_pid is not None and proc_alive(cur_pid):
+        kill_result = kill_run(cur_pid)
     state["session_status"] = "stopped"
     state["stop_reason"] = reason
     state["stopped_ts"] = time.time()
     save_state(session_dir, state)
-    append_journal(session_dir, {"event": event, "reason": reason})
+    journal_entry = {"event": event, "reason": reason}
+    if kill_result is not None:
+        journal_entry["killed_active_trainer"] = {
+            "pid": cur_pid, "config_id": cur.get("config_id"),
+            "kill_result": kill_result,
+        }
+    append_journal(session_dir, journal_entry)
 
 
 # -- main wake-up flow -------------------------------------------------------
