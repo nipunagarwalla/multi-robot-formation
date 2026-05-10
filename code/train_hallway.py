@@ -107,6 +107,14 @@ def main():
     )
     ap.add_argument("--lr", type=float, default=None, help="override LR")
     ap.add_argument("--entropy-coeff", type=float, default=None, help="override entropy coeff")
+    ap.add_argument("--vf-loss-coeff", type=float, default=None, help="override value-fn loss weight")
+    ap.add_argument("--max-grad-norm", type=float, default=None, help="override grad clip")
+    ap.add_argument("--clip-param", type=float, default=None, help="override PPO clip")
+    ap.add_argument("--num-sgd-iter", type=int, default=None, help="override PPO epochs / iter")
+    ap.add_argument("--gamma", type=float, default=None, help="override discount")
+    ap.add_argument("--gae-lambda", type=float, default=None, help="override GAE lambda")
+    ap.add_argument("--comm-range", type=float, default=None,
+                    help="override GNN comm radius (m)")
     ap.add_argument("--p-grab", type=float, default=None)
     ap.add_argument("--p-release", type=float, default=None)
     ap.add_argument("--p-spawn", type=float, default=None)
@@ -156,6 +164,20 @@ def main():
         config["lr"] = args.lr
     if args.entropy_coeff is not None:
         config["entropy_coeff"] = args.entropy_coeff
+    if args.vf_loss_coeff is not None:
+        config["vf_loss_coeff"] = args.vf_loss_coeff
+    if args.max_grad_norm is not None:
+        config["max_grad_norm"] = args.max_grad_norm
+    if args.clip_param is not None:
+        config["clip_param"] = args.clip_param
+    if args.num_sgd_iter is not None:
+        config["num_sgd_iter"] = args.num_sgd_iter
+    if args.gamma is not None:
+        config["gamma"] = args.gamma
+    if args.gae_lambda is not None:
+        config["lambda"] = args.gae_lambda
+    if args.comm_range is not None:
+        config["model"]["custom_model_config"]["comm_range"] = args.comm_range
     for k, v in (
         ("p_grab", args.p_grab),
         ("p_release", args.p_release),
