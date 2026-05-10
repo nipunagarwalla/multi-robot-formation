@@ -178,7 +178,7 @@ def end_session(session_dir: str, state: dict, *, reason: str, event: str = "STO
     state["stop_reason"] = reason
     state["stopped_ts"] = time.time()
     save_state(session_dir, state)
-    journal_entry = {"event": event, "reason": reason}
+    journal_entry: dict = {"event": event, "reason": reason}
     if kill_result is not None:
         journal_entry["killed_active_trainer"] = {
             "pid": cur_pid, "config_id": cur.get("config_id"),
