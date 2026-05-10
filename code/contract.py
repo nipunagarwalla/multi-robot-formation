@@ -23,7 +23,7 @@ Target formation: a circle of radius r(n_active) centred on the active centroid.
 # --- agent population --------------------------------------------------------
 MAX_AGENTS = 10
 MIN_AGENTS = 1
-INITIAL_AGENTS = 4
+INITIAL_AGENTS = 6
 
 # --- world geometry (8 m x 8 m square) ---------------------------------------
 DT = 0.05
