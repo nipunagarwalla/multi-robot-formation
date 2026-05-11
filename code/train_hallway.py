@@ -119,6 +119,13 @@ def main():
     ap.add_argument("--p-release", type=float, default=None)
     ap.add_argument("--p-spawn", type=float, default=None)
     ap.add_argument("--p-delete", type=float, default=None)
+    # Reward coefficient overrides (env-side; same dict the env reads from)
+    ap.add_argument("--k-fwd", type=float, default=None, help="reward coef for forward-y progress")
+    ap.add_argument("--k-form", type=float, default=None, help="reward coef for circle-formation distance penalty")
+    ap.add_argument("--k-coll", type=float, default=None, help="reward coef for collision penalty")
+    ap.add_argument("--k-wall", type=float, default=None, help="reward coef for x-boundary overshoot penalty")
+    ap.add_argument("--k-goal", type=float, default=None, help="one-shot bonus for reaching GOAL_Y")
+    ap.add_argument("--k-stall", type=float, default=None, help="reward coef for cluster stall penalty")
     ap.add_argument(
         "--init-n-present-dist",
         type=str,
@@ -178,6 +185,16 @@ def main():
         config["lambda"] = args.gae_lambda
     if args.comm_range is not None:
         config["model"]["custom_model_config"]["comm_range"] = args.comm_range
+    # reward-coef overrides go into env_config so they reach FormationHallwayEnv
+    reward_overrides = {
+        k: v for k, v in (
+            ("k_fwd", args.k_fwd), ("k_form", args.k_form), ("k_coll", args.k_coll),
+            ("k_wall", args.k_wall), ("k_goal", args.k_goal), ("k_stall", args.k_stall),
+        ) if v is not None
+    }
+    if reward_overrides:
+        config["env_config"].setdefault("reward_coeffs", dict(REWARD_COEFFS))
+        config["env_config"]["reward_coeffs"].update(reward_overrides)
     for k, v in (
         ("p_grab", args.p_grab),
         ("p_release", args.p_release),
