@@ -1,0 +1,70 @@
+<?xml version="1.0" ?>
+<!--
+  circle_arena.world
+
+  Empty 8m x 8m arena that mirrors the pygame FormationHallwayEnv world used
+  to train circle_policy_v1 (see code/contract.py: WORLD_W=WORLD_H=8.0,
+  SPAWN_Y=-3.5, GOAL_Y=+3.5).
+
+  No collision walls — env_hallway soft-clips internally; we leave that
+  containment to the policy / world boundaries.
+
+  The blue strip marks the spawn line, green strip marks the goal line.
+  The gazebo_ros_state plugin is loaded so the policy node can read all
+  robot poses from /model_states and teleport models via /set_entity_state
+  (used for spawn/delete teleop events).
+-->
+<sdf version="1.6">
+  <world name="circle_arena">
+
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <!-- 10 physics substeps per 20 Hz policy tick — matches pygame dt=0.05s -->
+    <physics type="ode">
+      <max_step_size>0.005</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>200</real_time_update_rate>
+    </physics>
+
+    <!-- Spawn line: blue strip at y = -3.5, spanning x in [-4, 4] -->
+    <model name="spawn_line">
+      <static>true</static>
+      <pose>0 -3.5 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><box><size>8.0 0.05 0.002</size></box></geometry>
+          <material>
+            <ambient>0.1 0.2 0.9 1</ambient>
+            <diffuse>0.1 0.2 0.9 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Goal line: green strip at y = +3.5 -->
+    <model name="goal_line">
+      <static>true</static>
+      <pose>0 3.5 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><box><size>8.0 0.05 0.002</size></box></geometry>
+          <material>
+            <ambient>0.1 0.8 0.2 1</ambient>
+            <diffuse>0.1 0.8 0.2 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- gazebo_ros_state: publishes /model_states (all robot poses+twists)
+         and exposes /set_entity_state service for teleporting models. -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros>
+        <namespace>/</namespace>
+      </ros>
+      <update_rate>50.0</update_rate>
+    </plugin>
+
+  </world>
+</sdf>
