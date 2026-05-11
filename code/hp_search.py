@@ -24,16 +24,27 @@ import random
 from typing import Iterator
 
 
-# Knob -> list of values. Each combination is a config.
+# Knob -> list of values. Random-fallback samples from this space.
+# PPO knobs are anchored at cfg #1's values for the v2 sweep (the prior
+# loop showed cfg #1 dominated; iterating reward shaping is the new lever),
+# but we keep them in the space so random sampling can still wander.
 SEARCH_SPACE = {
+    # PPO (anchored in HAND_PRIORITY but tunable in random fallback)
     "lr": [5e-5, 1e-4, 2e-4],
-    "entropy_coeff": [0.01, 0.03, 0.05, 0.08],
+    "entropy_coeff": [0.03, 0.05, 0.08],
     "vf_loss_coeff": [0.25, 0.5, 1.0],
     "max_grad_norm": [0.5, 1.0],
     "num_sgd_iter": [4, 8],
     "gamma": [0.99, 0.995],
     "p_grab": [0.003, 0.005],
     "init_n_present_dist": ["flat", "easy", "hard"],
+    # Reward shaping (the v2 lever)
+    "k_fwd":   [5.0, 10.0, 20.0],
+    "k_form":  [0.5, 2.0, 5.0],
+    "k_coll":  [2.0, 5.0],
+    "k_wall":  [0.5, 1.0],
+    "k_goal":  [20.0, 50.0, 100.0],
+    "k_stall": [0.0, 0.5, 2.0],
 }
 
 
@@ -45,29 +56,29 @@ INIT_N_PRESENT_DIST_PRESETS = {
 }
 
 
-# Hand-priority configs from v3 lessons:
-#   - entropy_coeff 0.03-0.05 (the v3 breakthrough was at 0.05)
-#   - lr 1e-4 to 2e-4 (5e-4 was too aggressive, 5e-5 too slow alone)
-#   - num_sgd_iter 8 (more SGD epochs / iter helped)
-#   - vf_loss_coeff 0.5 (1.0 dominated policy gradient in v3)
-#   - max_grad_norm 1.0 (0.5 throttled too much)
+# v2 sweep: anchor PPO knobs at cfg #1's values (the prior loop's
+# best-by-best-score config) and vary reward shaping. v1 showed every
+# entropy/lr combination collapsed; reward coefs are the remaining lever.
+ANCHOR_PPO = {
+    "lr": 1e-4, "entropy_coeff": 0.05, "vf_loss_coeff": 0.5,
+    "max_grad_norm": 1.0, "num_sgd_iter": 8, "gamma": 0.995,
+    "p_grab": 0.005, "init_n_present_dist": "flat",
+}
+
+# Hypothesis-driven reward-coef variants:
+#   1. k_goal heavy (5x) — make goal-reach dominate; everything else baseline
+#   2. k_form light (1/4) — let the policy learn to walk before circling
+#   3. k_fwd heavy (2x) — bigger forward-y gradient signal
+#   4. Combined 1+2+3
+#   5. No stall — don't punish standing still (was masking real progress signal)
+#   6. Aggressive — max forward, max goal, min penalties (last-ditch shaping)
 HAND_PRIORITY = [
-    {"lr": 1e-4, "entropy_coeff": 0.05, "vf_loss_coeff": 0.5, "max_grad_norm": 1.0,
-     "num_sgd_iter": 8, "gamma": 0.995, "p_grab": 0.005, "init_n_present_dist": "flat"},
-    {"lr": 2e-4, "entropy_coeff": 0.05, "vf_loss_coeff": 0.5, "max_grad_norm": 1.0,
-     "num_sgd_iter": 8, "gamma": 0.995, "p_grab": 0.005, "init_n_present_dist": "flat"},
-    {"lr": 1e-4, "entropy_coeff": 0.03, "vf_loss_coeff": 0.5, "max_grad_norm": 1.0,
-     "num_sgd_iter": 8, "gamma": 0.995, "p_grab": 0.005, "init_n_present_dist": "easy"},
-    {"lr": 2e-4, "entropy_coeff": 0.03, "vf_loss_coeff": 0.5, "max_grad_norm": 1.0,
-     "num_sgd_iter": 8, "gamma": 0.995, "p_grab": 0.005, "init_n_present_dist": "flat"},
-    {"lr": 1e-4, "entropy_coeff": 0.05, "vf_loss_coeff": 0.5, "max_grad_norm": 1.0,
-     "num_sgd_iter": 8, "gamma": 0.99,  "p_grab": 0.003, "init_n_present_dist": "flat"},
-    {"lr": 1e-4, "entropy_coeff": 0.08, "vf_loss_coeff": 0.5, "max_grad_norm": 1.0,
-     "num_sgd_iter": 8, "gamma": 0.995, "p_grab": 0.005, "init_n_present_dist": "flat"},
-    {"lr": 2e-4, "entropy_coeff": 0.05, "vf_loss_coeff": 0.25, "max_grad_norm": 1.0,
-     "num_sgd_iter": 8, "gamma": 0.995, "p_grab": 0.005, "init_n_present_dist": "flat"},
-    {"lr": 1e-4, "entropy_coeff": 0.05, "vf_loss_coeff": 0.5, "max_grad_norm": 0.5,
-     "num_sgd_iter": 4, "gamma": 0.995, "p_grab": 0.005, "init_n_present_dist": "hard"},
+    {**ANCHOR_PPO, "k_fwd": 5.0,  "k_form": 2.0, "k_coll": 5.0, "k_wall": 1.0, "k_goal": 100.0, "k_stall": 0.5},
+    {**ANCHOR_PPO, "k_fwd": 5.0,  "k_form": 0.5, "k_coll": 5.0, "k_wall": 1.0, "k_goal": 20.0,  "k_stall": 0.5},
+    {**ANCHOR_PPO, "k_fwd": 10.0, "k_form": 2.0, "k_coll": 5.0, "k_wall": 1.0, "k_goal": 20.0,  "k_stall": 0.5},
+    {**ANCHOR_PPO, "k_fwd": 10.0, "k_form": 0.5, "k_coll": 5.0, "k_wall": 1.0, "k_goal": 100.0, "k_stall": 0.5},
+    {**ANCHOR_PPO, "k_fwd": 5.0,  "k_form": 2.0, "k_coll": 5.0, "k_wall": 1.0, "k_goal": 20.0,  "k_stall": 0.0},
+    {**ANCHOR_PPO, "k_fwd": 20.0, "k_form": 0.5, "k_coll": 2.0, "k_wall": 0.5, "k_goal": 100.0, "k_stall": 0.0},
 ]
 
 
