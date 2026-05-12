@@ -84,17 +84,18 @@ class MarkersNode(Node):
             rgba=(0.15, 0.85, 0.25, 1.0),
         )
 
-        # Walls: 0.1 m thick, 0.4 m tall, centered at ±4.3 m on each axis.
-        # Sits 0.3 m past the trained 8x8 m playable boundary so the bottom
-        # of the spawn hex (limo_4 at y=-4.1) has clearance. Must match
-        # worlds/circle_arena.world exactly.
+        # Walls: 0.1 m thick, 1.0 m tall, centered at ±4.05 m on each axis.
+        # Wall material sits just OUTSIDE the trained 8x8 m playable
+        # boundary so the floor is exactly 8x8 m. Height 1.0 m because
+        # robot-robot collisions can launch one upward; 0.4 m walls let
+        # them clear. Must match worlds/circle_arena.world exactly.
         wall_thick = 0.1
-        wall_height = 0.4
+        wall_height = 1.0
         wall_z = wall_height / 2.0
-        wall_offset = 4.30
+        wall_offset = 4.05
         wall_color = (0.55, 0.55, 0.55, 0.85)
-        ns_len = 2.0 * wall_offset + wall_thick   # 8.7 m
-        ew_len = 2.0 * wall_offset - wall_thick   # 8.5 m
+        ns_len = 2.0 * wall_offset + wall_thick   # 8.2 m
+        ew_len = 2.0 * wall_offset - wall_thick   # 8.0 m
         walls = [
             _box_marker(
                 2, "wall_north",

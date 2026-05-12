@@ -62,6 +62,13 @@ from env_hallway import target_formation_positions  # noqa: E402
 
 URDF_REL = "urdf/limo_four_diff.xacro"
 ENTITY_PREFIX = "limo_"
+# Shift the spawn hexagon's Y center up from contract.SPAWN_Y (-3.5) so the
+# bottom point (limo_4 at y_center - 0.6) lands inside the ±4 m wall
+# envelope. -3.2 puts limo_4 at y=-3.8, ~0.15 m clear of the south wall.
+# The policy reads obs.pos at runtime — it doesn't care that the actual
+# spawn is 0.3 m up from training; that's well within its training
+# distribution.
+SPAWN_Y_LAUNCH = -3.2
 # LIMO is diff-drive (body-+X = forward). The policy was trained holonomic
 # with +Y = goal direction. Spawning yawed +pi/2 makes body-+X align with
 # world-+Y, so the policy's "drive forward" command actually moves toward
@@ -96,7 +103,9 @@ def _slot_poses(num_agents: int, total_robots: int):
     for i in range(total_robots):
         if i < num_agents:
             x = float(base[i, 0])
-            y = float(SPAWN_Y + base[i, 1])
+            # Note: SPAWN_Y_LAUNCH, not contract.SPAWN_Y, so the hex fits
+            # inside the ±4 m wall envelope. See module-level comment.
+            y = float(SPAWN_Y_LAUNCH + base[i, 1])
         else:
             x = float(SENTINEL_X)
             y = float(SENTINEL_Y)
@@ -225,6 +234,7 @@ def _build_fleet(context, *args, **kwargs):
                         "weights": LaunchConfiguration("weights"),
                         "num_agents": num_agents,
                         "max_agents": max_agents,
+                        "total_robots": total_robots,
                         "entity_prefix": ENTITY_PREFIX,
                         "use_sim_time": use_sim_time,
                     }],

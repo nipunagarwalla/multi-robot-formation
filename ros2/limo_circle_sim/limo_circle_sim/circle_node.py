@@ -124,6 +124,11 @@ class CircleNode(Node):
         self.declare_parameter("max_steps", 600)
         self.declare_parameter("autoreset", True)
         self.declare_parameter("entity_prefix", "limo_")
+        # Set this to match the launch's `total_robots` arg (defaults to
+        # num_agents). The node will only attempt to teleport entities up
+        # to this index — silences "entity [limo_N] does not exist" errors
+        # when running with total_robots < max_agents.
+        self.declare_parameter("total_robots", 0)
 
         weights = str(self.get_parameter("weights").value)
         if not weights or not os.path.isfile(weights):
@@ -146,6 +151,15 @@ class CircleNode(Node):
         self.max_steps = int(self.get_parameter("max_steps").value)
         self.autoreset = bool(self.get_parameter("autoreset").value)
         self.entity_prefix = str(self.get_parameter("entity_prefix").value)
+        # total_robots=0 means "trust num_agents and don't touch sentinels"
+        # (matches the default launch behavior of spawning only num_agents).
+        tr = int(self.get_parameter("total_robots").value)
+        self.total_robots = tr if tr > 0 else self.num_agents
+        if not (self.num_agents <= self.total_robots <= self.max_agents):
+            raise RuntimeError(
+                f"total_robots={self.total_robots} must be in "
+                f"[num_agents={self.num_agents}, max_agents={self.max_agents}]"
+            )
 
         # ---- load policy ------------------------------------------------
         env_shim = GazeboHallwayEnv()
@@ -400,10 +414,12 @@ class CircleNode(Node):
             p.publish(zero)
 
         # teleport: first num_agents to formation slots around (0, SPAWN_Y),
-        # rest to sentinel.
+        # the rest (if they exist) to sentinel. Skip indices beyond
+        # total_robots — those entities were never spawned in Gazebo and
+        # calling SetEntityState on them spams the gzserver log.
         base = target_formation_positions(self.num_agents).cpu().numpy()
         rng = np.random.default_rng()
-        for i in range(self.n):
+        for i in range(self.total_robots):
             if i < self.num_agents:
                 jx, jy = rng.uniform(-0.05, 0.05, size=2)
                 x = float(base[i, 0] + jx)
@@ -443,6 +459,10 @@ class CircleNode(Node):
         self._set_entity_pose(robot_idx, float(SENTINEL_X), float(SENTINEL_Y), 0.0)
 
     def _set_entity_pose(self, robot_idx: int, x: float, y: float, yaw: float) -> None:
+        if robot_idx >= self.total_robots:
+            # Entity wasn't spawned; calling SetEntityState would log
+            # "entity [limo_N] does not exist" every reset.
+            return
         if not self.set_state.service_is_ready():
             return
         req = SetEntityState.Request()
@@ -458,6 +478,18 @@ class CircleNode(Node):
         # async call — don't block the rclpy executor on the response
         self.set_state.call_async(req)
 
+    # --------------------------------------------------- shutdown ------
+    def stop_all_robots(self) -> None:
+        """Publish a zero Twist to every cmd_vel topic so gazebo_ros_diff_drive
+        doesn't keep executing the last random policy command after this node
+        dies. Called from main()'s finally block on Ctrl+C."""
+        zero = Twist()
+        for pub in self.cmd_pubs:
+            try:
+                pub.publish(zero)
+            except Exception:
+                pass
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -467,6 +499,16 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        # Send zero Twist to every robot so gazebo_ros_diff_drive doesn't
+        # keep replaying the last random command after circle_node dies.
+        # Small sleep to let DDS deliver the messages before tearing the
+        # node down.
+        try:
+            node.stop_all_robots()
+            import time
+            time.sleep(0.2)
+        except Exception:
+            pass
         node.destroy_node()
         rclpy.shutdown()
 
