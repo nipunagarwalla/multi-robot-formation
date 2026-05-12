@@ -2,17 +2,17 @@
 <!--
   circle_arena.world
 
-  Empty 8m x 8m arena that mirrors the pygame FormationHallwayEnv world used
-  to train circle_policy_v1 (see code/contract.py: WORLD_W=WORLD_H=8.0,
+  8m x 8m arena (X, Y in [-4, +4]) that mirrors the pygame FormationHallwayEnv
+  used to train circle_policy_v1 (see code/contract.py: WORLD_W=WORLD_H=8.0,
   SPAWN_Y=-3.5, GOAL_Y=+3.5).
 
-  No collision walls — env_hallway soft-clips internally; we leave that
-  containment to the policy / world boundaries.
+  Four 0.4 m tall physical perimeter walls bound the arena. Pygame env_hallway
+  soft-clips positions at the same boundary; the walls keep diff-drive LIMOs
+  from drifting out when the policy commands carry them past the edge.
 
-  The blue strip marks the spawn line, green strip marks the goal line.
-  The gazebo_ros_state plugin is loaded so the policy node can read all
-  robot poses from /model_states and teleport models via /set_entity_state
-  (used for spawn/delete teleop events).
+  Blue strip = spawn line, green strip = goal line.
+  The gazebo_ros_state plugin publishes /model_states (all robot poses) and
+  exposes /set_entity_state for teleporting models.
 -->
 <sdf version="1.6">
   <world name="circle_arena">
@@ -52,6 +52,69 @@
           <material>
             <ambient>0.1 0.8 0.2 1</ambient>
             <diffuse>0.1 0.8 0.2 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Perimeter walls: 8m long, 0.1m thick, 0.4m tall.
+         Centered on each side of the X/Y = ±4 boundary; the wall thickness
+         lives outside the arena so the playable area is exactly 8x8 m. -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 4.05 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>8.2 0.1 0.4</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>8.2 0.1 0.4</size></box></geometry>
+          <material>
+            <ambient>0.6 0.6 0.6 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -4.05 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>8.2 0.1 0.4</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>8.2 0.1 0.4</size></box></geometry>
+          <material>
+            <ambient>0.6 0.6 0.6 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_east">
+      <static>true</static>
+      <pose>4.05 0 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.1 8.0 0.4</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.1 8.0 0.4</size></box></geometry>
+          <material>
+            <ambient>0.6 0.6 0.6 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-4.05 0 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.1 8.0 0.4</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.1 8.0 0.4</size></box></geometry>
+          <material>
+            <ambient>0.6 0.6 0.6 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
           </material>
         </visual>
       </link>
