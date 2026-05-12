@@ -112,7 +112,15 @@ class CircleNode(Node):
         self.declare_parameter("num_agents", 6)
         self.declare_parameter("max_agents", MAX_AGENTS)
         self.declare_parameter("device", "cpu")
-        self.declare_parameter("k_yaw", 1.0)
+        # k_yaw=0 disables the yaw damper. The ROS1 reference used k_yaw=1.0
+        # because Triton was holonomic — keeping yaw at 0 made the policy's
+        # world-frame (vx, vy) directly executable via body-frame linear.y.
+        # LIMO is diff-drive, ignores linear.y, and we deliberately spawn
+        # yawed +pi/2 so body-+X aligns with world-+Y (the goal direction).
+        # A damper toward yaw=0 (or any fixed yaw) actively fights the
+        # spawn pose, spinning every robot from t=0. Keep it off until we
+        # have a real heading controller (turn-toward-velocity-vector).
+        self.declare_parameter("k_yaw", 0.0)
         self.declare_parameter("max_steps", 600)
         self.declare_parameter("autoreset", True)
         self.declare_parameter("entity_prefix", "limo_")
