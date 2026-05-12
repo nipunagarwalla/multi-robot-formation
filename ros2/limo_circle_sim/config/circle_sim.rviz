@@ -137,6 +137,66 @@ Visualization Manager:
       TF Prefix: limo_6
       Update Interval: 0
       Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_7/robot_description
+      Enabled: true
+      Name: limo_7
+      TF Prefix: limo_7
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_8/robot_description
+      Enabled: true
+      Name: limo_8
+      TF Prefix: limo_8
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_9/robot_description
+      Enabled: true
+      Name: limo_9
+      TF Prefix: limo_9
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_10/robot_description
+      Enabled: true
+      Name: limo_10
+      TF Prefix: limo_10
+      Update Interval: 0
+      Visual Enabled: true
   Views:
     Current:
       Class: rviz_default_plugins/Orbit

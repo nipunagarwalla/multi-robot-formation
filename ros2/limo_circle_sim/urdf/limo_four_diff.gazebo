@@ -52,7 +52,26 @@
     </gazebo>
 
   <gazebo>
-    <plugin name='diff_drive_$(arg robot_namespace)' filename='libgazebo_ros_diff_drive.so'>
+    <!-- Planar-move plugin: treats the LIMO as an OMNIDIRECTIONAL planar
+         body. Twist input is interpreted in body frame; the plugin
+         rotates it to world frame internally and applies it via
+         SetLinearVel / SetAngularVel.
+
+         circle_node and teleop_node both emit world-frame velocities;
+         they rotate world → body using the robot's current yaw before
+         publishing here. The two rotations cancel, so a command of
+         (vx_world, vy_world) actually moves the body in (+vx, +vy) world
+         coords regardless of the robot's heading. That's what the user
+         meant by "everything moves the robots in global frame".
+
+         Yaw stays at the spawn value (π/2) because angular.z is held at
+         0 in our control nodes — robots translate but don't rotate, the
+         omnidirectional assumption requested by the user.
+
+         publish_odom_tf=false: gt_tf_node owns the world → base_footprint
+         TF from /model_states. /odom topic still published for any
+         downstream consumer that wants the plugin's velocity integral. -->
+    <plugin name='planar_move_$(arg robot_namespace)' filename='libgazebo_ros_planar_move.so'>
           <ros>
             <namespace>$(arg robot_namespace)</namespace>
             <remapping>cmd_vel:=cmd_vel</remapping>
@@ -60,34 +79,16 @@
           </ros>
 
           <update_rate>30</update_rate>
-          <num_wheel_pairs>2</num_wheel_pairs>
-
-          <left_joint>front_left_wheel</left_joint>
-          <right_joint>front_right_wheel</right_joint>
-          <left_joint>rear_left_wheel</left_joint>
-          <right_joint>rear_right_wheel</right_joint>
-
-          <wheel_separation>0.172</wheel_separation>
-          <wheel_separation>0.172</wheel_separation>
-
-          <wheel_diameter>0.09</wheel_diameter>
-          <wheel_diameter>0.09</wheel_diameter>
-
-
-          <max_wheel_torque>1000</max_wheel_torque>
-          <max_wheel_acceleration>1.0</max_wheel_acceleration>
+          <publish_rate>20</publish_rate>
           <publish_odom>true</publish_odom>
-          <!-- publish_odom_tf disabled: gt_tf_node broadcasts the ground-truth
-               world → <ns>/base_footprint transform from /model_states so rviz
-               always shows the actual physics pose. The plugin's encoder-based
-               TF would diverge when wheels slip against walls. The /odom topic
-               (publish_odom=true above) is still published for any downstream
-               consumer that wants encoder odometry. -->
           <publish_odom_tf>false</publish_odom_tf>
-          <publish_wheel_tf>true</publish_wheel_tf>
           <odometry_frame>$(arg robot_namespace)/odom</odometry_frame>
           <robot_base_frame>$(arg robot_namespace)/base_footprint</robot_base_frame>
+
+          <covariance_x>0.0001</covariance_x>
+          <covariance_y>0.0001</covariance_y>
+          <covariance_yaw>0.01</covariance_yaw>
       </plugin>
-    </gazebo> 
+    </gazebo>
 
 </robot>

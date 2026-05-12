@@ -35,11 +35,15 @@ sys.path.insert(0, str(_REPO / "code"))
 from contract import MAX_AGENTS, MIN_AGENTS, MAX_V  # noqa: E402
 
 
+# World-frame teleop. Robots are treated as omnidirectional (planar_move
+# Gazebo plugin), so W/A/S/D map to +/-Y and +/-X world-frame velocities.
+# circle_node receives /teleop/cmd, merges with the policy action via
+# teleop_mask, and rotates world→body before publishing /limo_<i>/cmd_vel.
 DRIVE_KEYS_MAP = {
-    "w": np.array([0.0, 1.0], dtype=np.float32),
-    "s": np.array([0.0, -1.0], dtype=np.float32),
-    "a": np.array([-1.0, 0.0], dtype=np.float32),
-    "d": np.array([1.0, 0.0], dtype=np.float32),
+    "w": np.array([0.0, 1.0], dtype=np.float32),   # +Y world
+    "s": np.array([0.0, -1.0], dtype=np.float32),  # -Y world
+    "a": np.array([-1.0, 0.0], dtype=np.float32),  # -X world
+    "d": np.array([1.0, 0.0], dtype=np.float32),   # +X world
 }
 SPEED_STEP = 0.25
 SPEED_MIN = 0.25
@@ -172,7 +176,12 @@ class TeleopNode(Node):
         return True
 
     def _compute_teleop_vels(self) -> None:
-        """Mirror code/teleop.py:KeyboardTeleop.apply()."""
+        """World-frame velocity for the currently-selected teleop'd robot.
+
+        Combines the currently-pressed WASD keys (each a world-frame
+        unit vector), normalizes, scales by drive_speed. Other teleop'd
+        robots get zero (held in place by circle_node's override).
+        """
         v = np.zeros(2, dtype=np.float32)
         if self.selected is not None and self.pressed:
             for k in self.pressed:
@@ -181,15 +190,17 @@ class TeleopNode(Node):
             if norm > 0:
                 v = v / norm * self.drive_speed
         for r in range(self.n):
-            if self.teleop_mask[r] > 0.5:
-                if r == self.selected:
-                    self.teleop_vels[r] = v
-                else:
-                    self.teleop_vels[r] = 0.0
+            if self.teleop_mask[r] > 0.5 and r == self.selected:
+                self.teleop_vels[r] = v
             else:
                 self.teleop_vels[r] = 0.0
 
     def _publish(self) -> None:
+        # /teleop/mask: which robots circle_node should override with our
+        # teleop_vels. /teleop/present: which slots are present in Gazebo
+        # (used by circle_node to teleport models on spawn/delete edges).
+        # /teleop/cmd: per-robot world-frame (vx, vy) override. circle_node
+        # rotates world→body before publishing /limo_<i>/cmd_vel.
         m = Float32MultiArray()
         m.data = self.present_mask.tolist()
         self.pub_present.publish(m)
@@ -213,8 +224,9 @@ class TeleopNode(Node):
             sel = " <" if self.selected == i else ""
             lines.append(f"  robot {i+1:2d}  [{tag}]{sel}")
         lines.append("")
-        lines.append("keys: 1-9/0 toggle | WASD drive | Z/X speed")
-        lines.append("      = spawn | - delete | R release | Esc quit")
+        lines.append("keys: 1-9/0 toggle | WASD drive (world frame)")
+        lines.append("      Z/X speed  |  +  spawn  |  -  delete")
+        lines.append("      R release all  |  Esc quit")
         for k, line in enumerate(lines):
             surf = self.font.render(line, True, (220, 220, 220))
             self.screen.blit(surf, (10, 10 + 16 * k))

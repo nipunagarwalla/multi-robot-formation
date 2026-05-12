@@ -120,8 +120,13 @@ class CircleNode(Node):
         # A damper toward yaw=0 (or any fixed yaw) actively fights the
         # spawn pose, spinning every robot from t=0. Keep it off until we
         # have a real heading controller (turn-toward-velocity-vector).
+        # k_yaw=0 disables an optional yaw damper (default off — robots
+        # are omnidirectional and stay at their spawn yaw, no rotation
+        # needed). Left as a parameter for experiments.
         self.declare_parameter("k_yaw", 0.0)
-        self.declare_parameter("max_steps", 600)
+        # Episode length in policy ticks (1 tick = DT seconds). 600 was the
+        # pygame training horizon; for live viz/teleop demos we want longer.
+        self.declare_parameter("max_steps", 3000)
         self.declare_parameter("autoreset", True)
         self.declare_parameter("entity_prefix", "limo_")
         # Set this to match the launch's `total_robots` arg (defaults to
@@ -336,7 +341,10 @@ class CircleNode(Node):
             present_mask = self.present_mask.copy()
             teleop_vels = self.teleop_vels.copy()
 
-        # mirror env_hallway.vector_step: override teleop slots, zero non-present
+        # Mirror env_hallway.vector_step: for any robot with teleop_mask=1,
+        # override the policy action with the world-frame teleop velocity
+        # received from /teleop/cmd. Both are world frame; _publish_action
+        # below rotates to body frame for the planar_move plugin.
         a = a * (1.0 - teleop_mask[:, None]) + teleop_vels * teleop_mask[:, None]
         a = a * present_mask[:, None]
         a = np.clip(a, -MAX_V, MAX_V)
@@ -355,20 +363,37 @@ class CircleNode(Node):
 
     # --------------------------------------------------- publish ------
     def _publish_action(self, action_world: np.ndarray, present_mask: np.ndarray) -> None:
+        """Convert a world-frame (vx, vy) per robot into the body-frame
+        Twist the planar-move plugin expects.
+
+        Plugin behavior: input Twist.linear is body-frame; the plugin
+        rotates it to world frame using the robot's current yaw and
+        applies via SetLinearVel. So we send the world→body rotation here
+        and the plugin's body→world rotation cancels it out — net effect
+        is that (vx_w, vy_w) actually moves the body in those world
+        directions.
+
+        angular.z = 0 always — the omnidirectional assumption is that
+        robots translate without rotating. Yaw stays at the spawn (π/2).
+        """
         with self._lock:
             yaws = self.yaws.copy()
+
         for i in range(self.n):
             if present_mask[i] < 0.5:
                 continue
-            vx_w, vy_w = float(action_world[i, 0]), float(action_world[i, 1])
+            vx_w = float(action_world[i, 0])
+            vy_w = float(action_world[i, 1])
             yaw = float(yaws[i])
             tw = Twist()
-            # world -> body rotation. LIMO diff-drive will execute linear.x
-            # and angular.z; linear.y is ignored (see plan risk #1).
+            # World → body rotation (transpose of R(yaw)). After the plugin
+            # applies R(yaw) to map body→world, what comes out matches the
+            # world-frame intent.
             tw.linear.x = vx_w * math.cos(yaw) + vy_w * math.sin(yaw)
             tw.linear.y = -vx_w * math.sin(yaw) + vy_w * math.cos(yaw)
-            # passive yaw damping toward yaw=0 keeps body~world aligned so the
-            # ignored linear.y never has to do real work.
+            # No rotation commands — robots are omnidirectional and stay
+            # at their spawn yaw. The k_yaw parameter is left in place
+            # only for backwards-compat / experiments; default 0.
             tw.angular.z = -self.k_yaw * yaw
             self.cmd_pubs[i].publish(tw)
 
