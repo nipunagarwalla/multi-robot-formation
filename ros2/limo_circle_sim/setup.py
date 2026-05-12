@@ -34,6 +34,7 @@ setup(
         'console_scripts': [
             'circle_node = limo_circle_sim.circle_node:main',
             'teleop_node = limo_circle_sim.teleop_node:main',
+            'markers_node = limo_circle_sim.markers_node:main',
         ],
     },
 )

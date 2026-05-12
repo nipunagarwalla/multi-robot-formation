@@ -319,5 +319,15 @@ def generate_launch_description():
             condition=IfCondition(LaunchConfiguration("use_rviz")),
         ),
 
+        # Static arena geometry (spawn/goal lines + 4 walls) as Markers so
+        # rviz can render them. Cheap and unconditional — Gazebo physics
+        # gets the walls from the .world file, rviz gets them from here.
+        Node(
+            package="limo_circle_sim",
+            executable="markers_node",
+            output="screen",
+            parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+        ),
+
         OpaqueFunction(function=_build_fleet),
     ])

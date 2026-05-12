@@ -31,6 +31,22 @@ Visualization Manager:
     - Class: rviz_default_plugins/TF
       Enabled: false
       Name: TF
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Arena
+      Enabled: true
+      Namespaces:
+        spawn_line: true
+        goal_line: true
+        wall_north: true
+        wall_south: true
+        wall_east: true
+        wall_west: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /arena_markers
     - Alpha: 1
       Class: rviz_default_plugins/RobotModel
       Collision Enabled: false
