@@ -122,8 +122,13 @@ def _spawn_one(pkg_share, namespace: str, x: float, y: float, z: float, yaw: flo
                     value_type=str,
                 ),
                 "use_sim_time": use_sim_time,
+                # Prepend <ns>/ to every URDF frame name so multi-robot TF
+                # doesn't collide on the global /tf topic.
+                "frame_prefix": f"{namespace}/",
             }],
-            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
+            # NOTE: do NOT remap /tf or /tf_static — keeping them global is
+            # what lets rviz2 (running in the root namespace) see all robots
+            # in a single TF tree under the 'world' fixed frame.
         ),
         Node(
             package="joint_state_publisher",
