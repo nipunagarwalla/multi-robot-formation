@@ -7,11 +7,16 @@
                 <mass value="0.5" />
                 <inertia ixx="0.01055" ixy="0" ixz="0" iyy="0.00075" iyz="0" izz="0.01055" />
             </inertial>
+            <!-- Visual replaced with cylinder primitive (was: limo_wheel.dae)
+                 to skip 11 MB DAE per wheel × 4 wheels × N robots. -->
             <visual>
-                <origin xyz="0 0 0" rpy="0 0 0" />
+                <origin xyz="0 ${wheel_length/2} 0" rpy="1.57 0 0" />
                 <geometry>
-                    <mesh filename="file://$(find limo_circle_sim)/meshes/limo_wheel.dae" />
+                    <cylinder length="${wheel_length}" radius="${wheel_radius}" />
                 </geometry>
+                <material name="wheel_black">
+                    <color rgba="0.1 0.1 0.1 1"/>
+                </material>
             </visual>
             <collision>
               <origin xyz="0 ${wheel_length/2} 0" rpy="1.57 0 0" />

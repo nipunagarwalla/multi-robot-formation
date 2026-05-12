@@ -29,19 +29,24 @@
     <origin xyz="0.0 0.0 0.15" rpy="0 0 0"/>
   </joint>
     <!-- Base link -->
+    <!-- Visual replaced with a simple box (was: limo_base.dae) so gzclient/rviz
+         don't have to render a 50 MB DAE per robot. UTM/M1 has no GPU acceleration
+         for Linux so software rendering of large meshes OOM-kills the viewer. -->
     <link name="base_link">
         <visual>
-            <origin xyz="0 0 -0.15" rpy="0 0 1.57" />
+            <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <mesh filename="file://$(find limo_circle_sim)/meshes/limo_base.dae" scale="1 1 1"/>
+                <box size="${base_x_size} ${base_y_size} ${base_z_size}"/>
             </geometry>
+            <material name="limo_yellow">
+                <color rgba="1.0 0.85 0.1 1"/>
+            </material>
         </visual>
         <collision>
-            <!--origin xyz="0 0 -0.15" rpy="0 0 1.57" /-->
             <origin xyz="0 0 0" rpy="0 0 0" />
-          <geometry>
-              <box size="${base_x_size} ${base_y_size} ${base_z_size}"/>
-          </geometry>
+            <geometry>
+                <box size="${base_x_size} ${base_y_size} ${base_z_size}"/>
+            </geometry>
         </collision>
     </link>
 
