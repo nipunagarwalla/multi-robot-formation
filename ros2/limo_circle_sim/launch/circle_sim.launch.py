@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import math
 import pathlib
 import sys
 
@@ -61,24 +62,45 @@ from env_hallway import target_formation_positions  # noqa: E402
 
 URDF_REL = "urdf/limo_four_diff.xacro"
 ENTITY_PREFIX = "limo_"
+# LIMO is diff-drive (body-+X = forward). The policy was trained holonomic
+# with +Y = goal direction. Spawning yawed +pi/2 makes body-+X align with
+# world-+Y, so the policy's "drive forward" command actually moves toward
+# the goal (otherwise gazebo_ros_diff_drive ignores linear.y and the
+# robots crab sideways or freeze).
+DEFAULT_YAW = math.pi / 2
 
 
-def _slot_poses(num_agents: int, max_agents: int):
-    """Return list[(x, y, z, yaw)] of length max_agents.
+def _safe_str(v: float) -> str:
+    """Round to 4dp and snap near-zero values to +0.0.
+
+    spawn_entity.py uses argparse with single-dash long options. A value
+    like -2.6e-08 (which target_formation_positions(6) produces for the
+    top-of-circle X due to float precision) confuses argparse — it
+    interprets the leading '-' as a new flag.
+    """
+    if abs(v) < 1e-4:
+        v = 0.0
+    return f"{v:.4f}"
+
+
+def _slot_poses(num_agents: int, total_robots: int):
+    """Return list[(x, y, z, yaw)] of length total_robots.
 
     The first `num_agents` slots sit on the target_formation_positions
-    circle, shifted to (0, SPAWN_Y). The rest park at the sentinel.
+    circle, shifted to (0, SPAWN_Y). The rest park at the sentinel
+    (only present when total_robots > num_agents — opt-in via launch
+    arg `total_robots:=10` for full spawn/delete teleop coverage).
     """
-    base = target_formation_positions(num_agents).cpu().numpy()  # (num_agents, 2)
+    base = target_formation_positions(num_agents).cpu().numpy()
     out: list[tuple[float, float, float, float]] = []
-    for i in range(max_agents):
+    for i in range(total_robots):
         if i < num_agents:
             x = float(base[i, 0])
             y = float(SPAWN_Y + base[i, 1])
         else:
             x = float(SENTINEL_X)
             y = float(SENTINEL_Y)
-        out.append((x, y, 0.0, 0.0))
+        out.append((x, y, 0.0, DEFAULT_YAW))
     return out
 
 
@@ -114,10 +136,10 @@ def _spawn_one(pkg_share, namespace: str, x: float, y: float, z: float, yaw: flo
             arguments=[
                 "-entity", namespace,
                 "-topic", "robot_description",
-                "-x", str(x),
-                "-y", str(y),
-                "-z", str(z),
-                "-Y", str(yaw),
+                "-x", _safe_str(x),
+                "-y", _safe_str(y),
+                "-z", _safe_str(z),
+                "-Y", _safe_str(yaw),
                 "-robot_namespace", namespace,
             ],
             output="screen",
@@ -129,6 +151,10 @@ def _build_fleet(context, *args, **kwargs):
     """Resolve runtime args and emit the per-robot spawn actions."""
     num_agents = int(LaunchConfiguration("num_agents").perform(context))
     max_agents = int(LaunchConfiguration("max_agents").perform(context))
+    total_robots_str = LaunchConfiguration("total_robots").perform(context)
+    # default total_robots = num_agents (no sentinel spawns; lighter on RAM)
+    total_robots = int(total_robots_str) if total_robots_str else num_agents
+
     if max_agents != MAX_AGENTS:
         raise RuntimeError(
             f"max_agents={max_agents} != contract.MAX_AGENTS={MAX_AGENTS}; "
@@ -138,11 +164,16 @@ def _build_fleet(context, *args, **kwargs):
         raise RuntimeError(
             f"num_agents={num_agents} not in [1, {max_agents}]"
         )
+    if not (num_agents <= total_robots <= max_agents):
+        raise RuntimeError(
+            f"total_robots={total_robots} must be in [num_agents={num_agents}, "
+            f"max_agents={max_agents}]"
+        )
 
     use_sim_time = LaunchConfiguration("use_sim_time")
     pkg_share = FindPackageShare("limo_circle_sim").find("limo_circle_sim")
 
-    poses = _slot_poses(num_agents, max_agents)
+    poses = _slot_poses(num_agents, total_robots)
     actions = []
     for i, (x, y, z, yaw) in enumerate(poses):
         ns = f"{ENTITY_PREFIX}{i + 1}"
@@ -210,6 +241,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("num_agents", default_value="6"),
         DeclareLaunchArgument("max_agents", default_value=str(MAX_AGENTS)),
+        DeclareLaunchArgument(
+            "total_robots", default_value="",
+            description=("how many LIMO models to actually spawn (default: num_agents). "
+                         "Set to max_agents (10) to also spawn sentinel-parked spares "
+                         "for spawn/delete teleop. Each extra robot costs RAM."),
+        ),
         DeclareLaunchArgument("world", default_value=default_world),
         DeclareLaunchArgument(
             "use_policy", default_value="false",
