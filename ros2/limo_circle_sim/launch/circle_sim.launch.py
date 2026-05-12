@@ -222,6 +222,8 @@ def _build_fleet(context, *args, **kwargs):
                         "max_agents": max_agents,
                         "total_robots": total_robots,
                         "entity_prefix": ENTITY_PREFIX,
+                        "spawn_y": SPAWN_Y_LAUNCH,
+                        "spawn_yaw": DEFAULT_YAW,
                         "use_sim_time": use_sim_time,
                     }],
                     condition=IfCondition(LaunchConfiguration("use_policy")),

@@ -129,6 +129,12 @@ class CircleNode(Node):
         # to this index — silences "entity [limo_N] does not exist" errors
         # when running with total_robots < max_agents.
         self.declare_parameter("total_robots", 0)
+        # Spawn pose for episode resets. Defaults match the launch's
+        # SPAWN_Y_LAUNCH and DEFAULT_YAW so manual `ros2 run circle_node`
+        # produces the same pose as the launch did. Override these with
+        # -p spawn_y:=... -p spawn_yaw:=... if you change the launch.
+        self.declare_parameter("spawn_y", -3.2)
+        self.declare_parameter("spawn_yaw", math.pi / 2.0)
 
         weights = str(self.get_parameter("weights").value)
         if not weights or not os.path.isfile(weights):
@@ -160,6 +166,8 @@ class CircleNode(Node):
                 f"total_robots={self.total_robots} must be in "
                 f"[num_agents={self.num_agents}, max_agents={self.max_agents}]"
             )
+        self.spawn_y = float(self.get_parameter("spawn_y").value)
+        self.spawn_yaw = float(self.get_parameter("spawn_yaw").value)
 
         # ---- load policy ------------------------------------------------
         env_shim = GazeboHallwayEnv()
@@ -413,20 +421,26 @@ class CircleNode(Node):
         for p in self.cmd_pubs:
             p.publish(zero)
 
-        # teleport: first num_agents to formation slots around (0, SPAWN_Y),
+        # teleport: first num_agents to formation slots around (0, spawn_y),
         # the rest (if they exist) to sentinel. Skip indices beyond
         # total_robots — those entities were never spawned in Gazebo and
         # calling SetEntityState on them spams the gzserver log.
+        # spawn_y / spawn_yaw default to match the launch's spawn pose so
+        # episode-reset puts robots back exactly where they came from
+        # (not at contract.SPAWN_Y / yaw=0, which would put limo_4 inside
+        # the south wall and orient every robot perpendicular to the goal).
         base = target_formation_positions(self.num_agents).cpu().numpy()
         rng = np.random.default_rng()
         for i in range(self.total_robots):
             if i < self.num_agents:
                 jx, jy = rng.uniform(-0.05, 0.05, size=2)
                 x = float(base[i, 0] + jx)
-                y = float(SPAWN_Y + base[i, 1] + jy)
+                y = float(self.spawn_y + base[i, 1] + jy)
+                yaw = self.spawn_yaw
             else:
                 x, y = float(SENTINEL_X), float(SENTINEL_Y)
-            self._set_entity_pose(i, x, y, yaw=0.0)
+                yaw = 0.0
+            self._set_entity_pose(i, x, y, yaw=yaw)
 
         with self._lock:
             self.present_mask[:] = 0.0
@@ -448,11 +462,12 @@ class CircleNode(Node):
             if active.any():
                 centroid = self.poses_xy[active].mean(axis=0)
             else:
-                centroid = np.array([0.0, SPAWN_Y], dtype=np.float32)
+                centroid = np.array([0.0, self.spawn_y], dtype=np.float32)
         rng = np.random.default_rng()
         jitter = rng.uniform(-0.15, 0.15, size=2)
         self._set_entity_pose(
-            robot_idx, float(centroid[0] + jitter[0]), float(centroid[1] + jitter[1]), 0.0
+            robot_idx, float(centroid[0] + jitter[0]),
+            float(centroid[1] + jitter[1]), self.spawn_yaw,
         )
 
     def _teleport_to_sentinel(self, robot_idx: int) -> None:
@@ -480,15 +495,25 @@ class CircleNode(Node):
 
     # --------------------------------------------------- shutdown ------
     def stop_all_robots(self) -> None:
-        """Publish a zero Twist to every cmd_vel topic so gazebo_ros_diff_drive
-        doesn't keep executing the last random policy command after this node
-        dies. Called from main()'s finally block on Ctrl+C."""
+        """Publish zero Twist to every cmd_vel so gazebo_ros_diff_drive
+        doesn't keep executing the last random policy command after this
+        node dies.
+
+        We publish 10 times over 0.5 s with sleeps in between because a
+        single publish() on a reliable QoS publisher hands the message to
+        DDS asynchronously; on an emulated arm64 VM, the publisher entity
+        can be torn down by destroy_node() before DDS has actually
+        delivered. Spamming guarantees at least one survives.
+        """
+        import time
         zero = Twist()
-        for pub in self.cmd_pubs:
-            try:
-                pub.publish(zero)
-            except Exception:
-                pass
+        for _ in range(10):
+            for pub in self.cmd_pubs:
+                try:
+                    pub.publish(zero)
+                except Exception:
+                    pass
+            time.sleep(0.05)
 
 
 def main(args=None):
@@ -501,12 +526,10 @@ def main(args=None):
     finally:
         # Send zero Twist to every robot so gazebo_ros_diff_drive doesn't
         # keep replaying the last random command after circle_node dies.
-        # Small sleep to let DDS deliver the messages before tearing the
-        # node down.
+        # stop_all_robots itself does the spam-and-sleep dance internally;
+        # by the time it returns DDS should have delivered at least once.
         try:
             node.stop_all_robots()
-            import time
-            time.sleep(0.2)
         except Exception:
             pass
         node.destroy_node()
