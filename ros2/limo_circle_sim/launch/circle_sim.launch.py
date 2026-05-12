@@ -198,27 +198,13 @@ def _build_fleet(context, *args, **kwargs):
                 actions=[_spawn_one(pkg_share, ns, x, y, z, yaw, use_sim_time)],
             )
         )
-        # Static TF world -> <ns>/odom at spawn pose. The diff_drive plugin
-        # publishes <ns>/odom -> <ns>/base_footprint live, so chaining gives
-        # rviz the world-frame pose of every robot from a single fixed frame.
-        actions.append(
-            Node(
-                package="tf2_ros",
-                executable="static_transform_publisher",
-                name=f"world_to_{ns}_odom",
-                arguments=[
-                    "--x", _safe_str(x),
-                    "--y", _safe_str(y),
-                    "--z", _safe_str(z),
-                    "--yaw", _safe_str(yaw),
-                    "--pitch", "0",
-                    "--roll", "0",
-                    "--frame-id", "world",
-                    "--child-frame-id", f"{ns}/odom",
-                ],
-                output="screen",
-            )
-        )
+        # Note: the static world -> <ns>/odom transform that used to live
+        # here was removed. The diff_drive plugin's encoder-derived
+        # <ns>/odom -> <ns>/base_footprint diverges from physics when
+        # wheels slip against walls, so rviz showed robots phasing through
+        # the arena. gt_tf_node now publishes world -> <ns>/base_footprint
+        # directly from /model_states (ground truth) and the URDF disables
+        # the plugin's publish_odom_tf. See gt_tf_node.py for the rationale.
 
     # circle_node — opt-in via use_policy:=true. Default false so you can
     # `ros2 run limo_circle_sim circle_node` manually for debugging.
@@ -335,6 +321,18 @@ def generate_launch_description():
         Node(
             package="limo_circle_sim",
             executable="markers_node",
+            output="screen",
+            parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+        ),
+
+        # Ground-truth TF broadcaster — publishes world → <ns>/base_footprint
+        # for every LIMO from /model_states. Required for correct rviz
+        # rendering because the diff_drive plugin's encoder odometry drifts
+        # when wheels slip (against walls or each other) and rviz used to
+        # show robots far from their physics position. Lightweight.
+        Node(
+            package="limo_circle_sim",
+            executable="gt_tf_node",
             output="screen",
             parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
         ),

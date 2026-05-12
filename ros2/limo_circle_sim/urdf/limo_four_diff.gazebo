@@ -77,7 +77,13 @@
           <max_wheel_torque>1000</max_wheel_torque>
           <max_wheel_acceleration>1.0</max_wheel_acceleration>
           <publish_odom>true</publish_odom>
-          <publish_odom_tf>true</publish_odom_tf>
+          <!-- publish_odom_tf disabled: gt_tf_node broadcasts the ground-truth
+               world → <ns>/base_footprint transform from /model_states so rviz
+               always shows the actual physics pose. The plugin's encoder-based
+               TF would diverge when wheels slip against walls. The /odom topic
+               (publish_odom=true above) is still published for any downstream
+               consumer that wants encoder odometry. -->
+          <publish_odom_tf>false</publish_odom_tf>
           <publish_wheel_tf>true</publish_wheel_tf>
           <odometry_frame>$(arg robot_namespace)/odom</odometry_frame>
           <robot_base_frame>$(arg robot_namespace)/base_footprint</robot_base_frame>
