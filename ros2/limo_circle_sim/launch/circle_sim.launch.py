@@ -39,7 +39,7 @@ from launch.actions import (
     OpaqueFunction,
     TimerAction,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, PushRosNamespace
@@ -257,6 +257,12 @@ def generate_launch_description():
             description="start teleop_node from the launch (default off — run it manually with `ros2 run`)",
         ),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
+        DeclareLaunchArgument(
+            "headless", default_value="false",
+            description=("skip gzclient (the GUI). gzserver still runs. "
+                         "Set true on RAM-constrained machines (e.g. M1 UTM VMs) "
+                         "where gzclient gets OOM-killed."),
+        ),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -268,6 +274,7 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(
                 PathJoinSubstitution([pkg_gazebo_ros, "launch", "gzclient.launch.py"])
             ),
+            condition=UnlessCondition(LaunchConfiguration("headless")),
         ),
 
         OpaqueFunction(function=_build_fleet),
