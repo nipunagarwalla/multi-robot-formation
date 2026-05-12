@@ -84,36 +84,40 @@ class MarkersNode(Node):
             rgba=(0.15, 0.85, 0.25, 1.0),
         )
 
-        # Walls: thickness 0.1 m, height 0.4 m, centered just OUTSIDE the
-        # ±WORLD_W/2 = ±4 m playable boundary so the floor is exactly 8x8 m.
+        # Walls: 0.1 m thick, 0.4 m tall, centered at ±4.3 m on each axis.
+        # Sits 0.3 m past the trained 8x8 m playable boundary so the bottom
+        # of the spawn hex (limo_4 at y=-4.1) has clearance. Must match
+        # worlds/circle_arena.world exactly.
         wall_thick = 0.1
         wall_height = 0.4
         wall_z = wall_height / 2.0
-        wall_offset = (WORLD_W / 2.0) + wall_thick / 2.0  # 4.05 m
+        wall_offset = 4.30
         wall_color = (0.55, 0.55, 0.55, 0.85)
+        ns_len = 2.0 * wall_offset + wall_thick   # 8.7 m
+        ew_len = 2.0 * wall_offset - wall_thick   # 8.5 m
         walls = [
             _box_marker(
                 2, "wall_north",
                 pos=(0.0, wall_offset, wall_z),
-                size=(WORLD_W + wall_thick * 2.0, wall_thick, wall_height),
+                size=(ns_len, wall_thick, wall_height),
                 rgba=wall_color,
             ),
             _box_marker(
                 3, "wall_south",
                 pos=(0.0, -wall_offset, wall_z),
-                size=(WORLD_W + wall_thick * 2.0, wall_thick, wall_height),
+                size=(ns_len, wall_thick, wall_height),
                 rgba=wall_color,
             ),
             _box_marker(
                 4, "wall_east",
                 pos=(wall_offset, 0.0, wall_z),
-                size=(wall_thick, WORLD_H, wall_height),
+                size=(wall_thick, ew_len, wall_height),
                 rgba=wall_color,
             ),
             _box_marker(
                 5, "wall_west",
                 pos=(-wall_offset, 0.0, wall_z),
-                size=(wall_thick, WORLD_H, wall_height),
+                size=(wall_thick, ew_len, wall_height),
                 rgba=wall_color,
             ),
         ]

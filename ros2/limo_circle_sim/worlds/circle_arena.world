@@ -57,16 +57,18 @@
       </link>
     </model>
 
-    <!-- Perimeter walls: 8m long, 0.1m thick, 0.4m tall.
-         Centered on each side of the X/Y = ±4 boundary; the wall thickness
-         lives outside the arena so the playable area is exactly 8x8 m. -->
+    <!-- Perimeter walls: 0.1m thick, 0.4m tall, centered at ±4.3 m on each
+         axis. They sit 0.3 m past the trained 8x8 m playable boundary so
+         the bottom of the spawn hexagon (limo_4 at y=-4.1) has clearance.
+         pygame env_hallway soft-clips at ±4 m; we keep the visual boundary
+         and physics containment slightly outside that. -->
     <model name="wall_north">
       <static>true</static>
-      <pose>0 4.05 0.2 0 0 0</pose>
+      <pose>0 4.30 0.2 0 0 0</pose>
       <link name="link">
-        <collision name="col"><geometry><box><size>8.2 0.1 0.4</size></box></geometry></collision>
+        <collision name="col"><geometry><box><size>8.7 0.1 0.4</size></box></geometry></collision>
         <visual name="vis">
-          <geometry><box><size>8.2 0.1 0.4</size></box></geometry>
+          <geometry><box><size>8.7 0.1 0.4</size></box></geometry>
           <material>
             <ambient>0.6 0.6 0.6 1</ambient>
             <diffuse>0.6 0.6 0.6 1</diffuse>
@@ -77,11 +79,11 @@
 
     <model name="wall_south">
       <static>true</static>
-      <pose>0 -4.05 0.2 0 0 0</pose>
+      <pose>0 -4.30 0.2 0 0 0</pose>
       <link name="link">
-        <collision name="col"><geometry><box><size>8.2 0.1 0.4</size></box></geometry></collision>
+        <collision name="col"><geometry><box><size>8.7 0.1 0.4</size></box></geometry></collision>
         <visual name="vis">
-          <geometry><box><size>8.2 0.1 0.4</size></box></geometry>
+          <geometry><box><size>8.7 0.1 0.4</size></box></geometry>
           <material>
             <ambient>0.6 0.6 0.6 1</ambient>
             <diffuse>0.6 0.6 0.6 1</diffuse>
@@ -92,11 +94,11 @@
 
     <model name="wall_east">
       <static>true</static>
-      <pose>4.05 0 0.2 0 0 0</pose>
+      <pose>4.30 0 0.2 0 0 0</pose>
       <link name="link">
-        <collision name="col"><geometry><box><size>0.1 8.0 0.4</size></box></geometry></collision>
+        <collision name="col"><geometry><box><size>0.1 8.5 0.4</size></box></geometry></collision>
         <visual name="vis">
-          <geometry><box><size>0.1 8.0 0.4</size></box></geometry>
+          <geometry><box><size>0.1 8.5 0.4</size></box></geometry>
           <material>
             <ambient>0.6 0.6 0.6 1</ambient>
             <diffuse>0.6 0.6 0.6 1</diffuse>
@@ -107,11 +109,11 @@
 
     <model name="wall_west">
       <static>true</static>
-      <pose>-4.05 0 0.2 0 0 0</pose>
+      <pose>-4.30 0 0.2 0 0 0</pose>
       <link name="link">
-        <collision name="col"><geometry><box><size>0.1 8.0 0.4</size></box></geometry></collision>
+        <collision name="col"><geometry><box><size>0.1 8.5 0.4</size></box></geometry></collision>
         <visual name="vis">
-          <geometry><box><size>0.1 8.0 0.4</size></box></geometry>
+          <geometry><box><size>0.1 8.5 0.4</size></box></geometry>
           <material>
             <ambient>0.6 0.6 0.6 1</ambient>
             <diffuse>0.6 0.6 0.6 1</diffuse>
