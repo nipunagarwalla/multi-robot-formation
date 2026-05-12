@@ -1,0 +1,83 @@
+# rviz2 config for limo_circle_sim.
+#
+# Fixed frame = world. Each LIMO has its own RobotModel display backed by
+# the namespaced /limo_<i>/robot_description topic. tf2_ros static
+# publishers in the launch file link world -> <ns>/odom; the diff_drive
+# plugin links <ns>/odom -> <ns>/base_footprint live.
+#
+# Designed for 6 robots. Add or remove RobotModel displays as needed.
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Global Options:
+    Background Color: 28; 28; 32
+    Default Light: true
+    Fixed Frame: world
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 8
+      Color: 100; 100; 100
+      Plane: XY
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+    - Class: rviz_default_plugins/RobotModel
+      Name: limo_1
+      Enabled: true
+      Visual Enabled: true
+      Description Topic:
+        Value: /limo_1/robot_description
+      TF Prefix: limo_1
+    - Class: rviz_default_plugins/RobotModel
+      Name: limo_2
+      Enabled: true
+      Visual Enabled: true
+      Description Topic:
+        Value: /limo_2/robot_description
+      TF Prefix: limo_2
+    - Class: rviz_default_plugins/RobotModel
+      Name: limo_3
+      Enabled: true
+      Visual Enabled: true
+      Description Topic:
+        Value: /limo_3/robot_description
+      TF Prefix: limo_3
+    - Class: rviz_default_plugins/RobotModel
+      Name: limo_4
+      Enabled: true
+      Visual Enabled: true
+      Description Topic:
+        Value: /limo_4/robot_description
+      TF Prefix: limo_4
+    - Class: rviz_default_plugins/RobotModel
+      Name: limo_5
+      Enabled: true
+      Visual Enabled: true
+      Description Topic:
+        Value: /limo_5/robot_description
+      TF Prefix: limo_5
+    - Class: rviz_default_plugins/RobotModel
+      Name: limo_6
+      Enabled: true
+      Visual Enabled: true
+      Description Topic:
+        Value: /limo_6/robot_description
+      TF Prefix: limo_6
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 8
+      Focal Point: {X: 0, Y: 0, Z: 0}
+      Pitch: 0.95
+      Yaw: 4.71239
+Window Geometry:
+  Height: 720
+  Width: 960

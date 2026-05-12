@@ -184,6 +184,27 @@ def _build_fleet(context, *args, **kwargs):
                 actions=[_spawn_one(pkg_share, ns, x, y, z, yaw, use_sim_time)],
             )
         )
+        # Static TF world -> <ns>/odom at spawn pose. The diff_drive plugin
+        # publishes <ns>/odom -> <ns>/base_footprint live, so chaining gives
+        # rviz the world-frame pose of every robot from a single fixed frame.
+        actions.append(
+            Node(
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name=f"world_to_{ns}_odom",
+                arguments=[
+                    "--x", _safe_str(x),
+                    "--y", _safe_str(y),
+                    "--z", _safe_str(z),
+                    "--yaw", _safe_str(yaw),
+                    "--pitch", "0",
+                    "--roll", "0",
+                    "--frame-id", "world",
+                    "--child-frame-id", f"{ns}/odom",
+                ],
+                output="screen",
+            )
+        )
 
     # circle_node — opt-in via use_policy:=true. Default false so you can
     # `ros2 run limo_circle_sim circle_node` manually for debugging.
@@ -263,6 +284,11 @@ def generate_launch_description():
                          "Set true on RAM-constrained machines (e.g. M1 UTM VMs) "
                          "where gzclient gets OOM-killed."),
         ),
+        DeclareLaunchArgument(
+            "use_rviz", default_value="false",
+            description=("start rviz2 with config/circle_sim.rviz. "
+                         "Cheaper than gzclient on software-GL systems."),
+        ),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -275,6 +301,17 @@ def generate_launch_description():
                 PathJoinSubstitution([pkg_gazebo_ros, "launch", "gzclient.launch.py"])
             ),
             condition=UnlessCondition(LaunchConfiguration("headless")),
+        ),
+
+        Node(
+            package="rviz2",
+            executable="rviz2",
+            arguments=[
+                "-d",
+                PathJoinSubstitution([pkg_share, "config", "circle_sim.rviz"]),
+            ],
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("use_rviz")),
         ),
 
         OpaqueFunction(function=_build_fleet),
