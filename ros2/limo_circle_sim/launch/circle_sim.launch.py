@@ -154,7 +154,8 @@ def _build_fleet(context, *args, **kwargs):
             )
         )
 
-    # circle_node — wait for all robots to be on the bus before starting
+    # circle_node — opt-in via use_policy:=true. Default false so you can
+    # `ros2 run limo_circle_sim circle_node` manually for debugging.
     actions.append(
         TimerAction(
             period=0.4 * max_agents + 2.0,
@@ -170,6 +171,7 @@ def _build_fleet(context, *args, **kwargs):
                         "entity_prefix": ENTITY_PREFIX,
                         "use_sim_time": use_sim_time,
                     }],
+                    condition=IfCondition(LaunchConfiguration("use_policy")),
                 ),
             ],
         )
@@ -202,11 +204,21 @@ def generate_launch_description():
     pkg_gazebo_ros = FindPackageShare("gazebo_ros")
 
     return LaunchDescription([
-        DeclareLaunchArgument("weights", description="path to .pt checkpoint"),
+        DeclareLaunchArgument(
+            "weights", default_value="",
+            description="path to .pt checkpoint (only required when use_policy:=true)",
+        ),
         DeclareLaunchArgument("num_agents", default_value="6"),
         DeclareLaunchArgument("max_agents", default_value=str(MAX_AGENTS)),
         DeclareLaunchArgument("world", default_value=default_world),
-        DeclareLaunchArgument("use_teleop", default_value="true"),
+        DeclareLaunchArgument(
+            "use_policy", default_value="false",
+            description="start circle_node from the launch (default off — run it manually with `ros2 run`)",
+        ),
+        DeclareLaunchArgument(
+            "use_teleop", default_value="false",
+            description="start teleop_node from the launch (default off — run it manually with `ros2 run`)",
+        ),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
 
         IncludeLaunchDescription(

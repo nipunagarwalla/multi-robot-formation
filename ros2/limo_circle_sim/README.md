@@ -52,21 +52,47 @@ Python environment.
 
 ## Run
 
+The launch only brings up Gazebo + the LIMO fleet by default. Run the
+policy and teleop nodes yourself in separate terminals — easier to
+restart, swap checkpoints, or attach a debugger.
+
+**Terminal 1 — Gazebo + fleet:**
 ```bash
-ros2 launch limo_circle_sim circle_sim.launch.py \
-    weights:=/abs/path/to/weights/latest.pt \
-    num_agents:=6
+ros2 launch limo_circle_sim circle_sim.launch.py num_agents:=6
 ```
 
-Args:
+**Terminal 2 — policy node:**
+```bash
+ros2 run limo_circle_sim circle_node --ros-args \
+    -p weights:=$HOME/multi-robot-formation/weights/latest.pt \
+    -p num_agents:=6
+```
+
+**Terminal 3 — keyboard teleop:**
+```bash
+ros2 run limo_circle_sim teleop_node --ros-args -p num_agents:=6
+```
+
+If you'd rather have everything come up from one launch (less
+flexibility, but one window), pass the opt-in flags:
+
+```bash
+ros2 launch limo_circle_sim circle_sim.launch.py \
+    weights:=$HOME/multi-robot-formation/weights/latest.pt \
+    num_agents:=6 \
+    use_policy:=true use_teleop:=true
+```
+
+Launch args:
 
 | arg | default | notes |
 |---|---|---|
-| `weights` | (required) | absolute path to a `.pt` checkpoint |
 | `num_agents` | `6` | initial present count, 1..max_agents |
 | `max_agents` | `10` | must equal `code/contract.py:MAX_AGENTS` |
 | `world` | `circle_arena.world` | |
-| `use_teleop` | `true` | start the keyboard teleop window |
+| `use_policy` | `false` | if true, launch starts circle_node (needs `weights:=`) |
+| `use_teleop` | `false` | if true, launch starts teleop_node |
+| `weights` | `""` | absolute path to a `.pt` checkpoint; only required when `use_policy:=true` |
 
 ## Verifying the contract (smoke tests)
 
