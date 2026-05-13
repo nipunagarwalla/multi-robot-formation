@@ -56,12 +56,26 @@ class TeleopNode(Node):
         self.declare_parameter("num_agents", 6)
         self.declare_parameter("drive_speed", float(MAX_V))
         self.declare_parameter("tick_hz", 30.0)
+        # max_agents lets the same teleop_node serve both circle_node
+        # (policy_v1, MAX_AGENTS=10) and hallway_node (policy_v2,
+        # MAX_AGENTS=4). Default 10 keeps backwards compat with circle_node.
+        # Pass -p max_agents:=4 when running against hallway_node so the
+        # status panel and array sizes match the v2 contract.
+        self.declare_parameter("max_agents", MAX_AGENTS)
 
         n0 = int(self.get_parameter("num_agents").value)
         self.drive_speed = float(self.get_parameter("drive_speed").value)
         tick_hz = float(self.get_parameter("tick_hz").value)
 
-        self.n = MAX_AGENTS
+        self.n = int(self.get_parameter("max_agents").value)
+        if not (1 <= self.n <= MAX_AGENTS):
+            raise RuntimeError(
+                f"max_agents={self.n} must be in [1, {MAX_AGENTS}]"
+            )
+        if not (1 <= n0 <= self.n):
+            raise RuntimeError(
+                f"num_agents={n0} must be in [1, max_agents={self.n}]"
+            )
         self.present_mask = np.zeros(self.n, dtype=np.float32)
         self.present_mask[:n0] = 1.0
         self.teleop_mask = np.zeros(self.n, dtype=np.float32)

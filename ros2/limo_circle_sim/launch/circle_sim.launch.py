@@ -75,6 +75,33 @@ SPAWN_Y_LAUNCH = -3.2
 # the goal (otherwise gazebo_ros_diff_drive ignores linear.y and the
 # robots crab sideways or freeze).
 DEFAULT_YAW = math.pi / 2
+# Side length of the hallway-style (square / triangle / line) formation.
+# Mirrors policy_v2's contract.FORMATION_SCALE; used only when
+# spawn_pattern=hallway.
+HALLWAY_FORMATION_SCALE = 0.35
+
+
+def _hallway_formation(n: int, scale: float = HALLWAY_FORMATION_SCALE):
+    """Inline copy of upstream/aneesh/policy_v2:env_hallway.target_formation_positions.
+    Returns a list of (x, y) tuples centered at origin.
+
+      n=4 → square        (vertices at ±s/2)
+      n=3 → triangle      (one vertex pointing +y)
+      n=2 → horizontal line, separation s
+      n=1 → solo at origin
+    """
+    s = scale
+    if n == 4:
+        return [(-s / 2, -s / 2), (s / 2, -s / 2), (s / 2, s / 2), (-s / 2, s / 2)]
+    if n == 3:
+        h = s / (2 * 3 ** 0.5)
+        H = s / (3 ** 0.5)
+        return [(-s / 2, -h), (s / 2, -h), (0.0, H)]
+    if n == 2:
+        return [(-s / 2, 0.0), (s / 2, 0.0)]
+    if n == 1:
+        return [(0.0, 0.0)]
+    raise ValueError(f"unsupported active_count={n} for hallway spawn_pattern")
 
 
 def _safe_str(v: float) -> str:
@@ -90,26 +117,39 @@ def _safe_str(v: float) -> str:
     return f"{v:.4f}"
 
 
-def _slot_poses(num_agents: int, total_robots: int):
+def _slot_poses(num_agents: int, total_robots: int, spawn_pattern: str = "circle"):
     """Return list[(x, y, z, yaw)] of length total_robots.
 
-    The first `num_agents` slots sit on the target_formation_positions
-    circle, shifted to (0, SPAWN_Y). The rest park at the sentinel
-    (only present when total_robots > num_agents — opt-in via launch
-    arg `total_robots:=10` for full spawn/delete teleop coverage).
+    The first `num_agents` slots sit on the chosen formation, shifted to
+    (0, SPAWN_Y_LAUNCH). The rest park at the sentinel (only present when
+    total_robots > num_agents — opt-in via launch arg
+    `total_robots:=10` for full spawn/delete teleop coverage).
+
+    spawn_pattern:
+      "circle"  → v1's n-gon on a 0.6 m radius circle (default; pairs
+                  with circle_node + policy_v1)
+      "hallway" → v2's square/triangle/line (pairs with hallway_node +
+                  policy_v2). n must be in {1..4}.
     """
-    base = target_formation_positions(num_agents).cpu().numpy()
+    if spawn_pattern == "hallway":
+        base = _hallway_formation(num_agents)
+    else:  # "circle" (default) — v1's n-gon
+        # target_formation_positions returns a torch tensor; convert to
+        # a list of (x, y) tuples for uniform handling with _hallway_formation.
+        t = target_formation_positions(num_agents).cpu().numpy()
+        base = [(float(t[i, 0]), float(t[i, 1])) for i in range(num_agents)]
+
     out: list[tuple[float, float, float, float]] = []
     for i in range(total_robots):
         if i < num_agents:
-            x = float(base[i, 0])
-            # Note: SPAWN_Y_LAUNCH, not contract.SPAWN_Y, so the hex fits
-            # inside the ±4 m wall envelope. See module-level comment.
-            y = float(SPAWN_Y_LAUNCH + base[i, 1])
+            x, y_offset = base[i]
+            # Note: SPAWN_Y_LAUNCH, not contract.SPAWN_Y, so the formation
+            # fits inside the ±4 m wall envelope. See module-level comment.
+            y = float(SPAWN_Y_LAUNCH + y_offset)
         else:
             x = float(SENTINEL_X)
             y = float(SENTINEL_Y)
-        out.append((x, y, 0.0, DEFAULT_YAW))
+        out.append((float(x), y, 0.0, DEFAULT_YAW))
     return out
 
 
@@ -166,14 +206,33 @@ def _build_fleet(context, *args, **kwargs):
     num_agents = int(LaunchConfiguration("num_agents").perform(context))
     max_agents = int(LaunchConfiguration("max_agents").perform(context))
     total_robots_str = LaunchConfiguration("total_robots").perform(context)
+    spawn_pattern = LaunchConfiguration("spawn_pattern").perform(context) or "circle"
     # default total_robots = num_agents (no sentinel spawns; lighter on RAM)
     total_robots = int(total_robots_str) if total_robots_str else num_agents
 
-    if max_agents != MAX_AGENTS:
+    # For circle pattern we sanity-check against policy_v1's contract.MAX_AGENTS=10.
+    # For hallway pattern, policy_v2 caps at MAX_AGENTS=4 regardless of the
+    # max_agents launch arg, so we cap effective max at 4 in that branch.
+    if spawn_pattern == "hallway":
+        if max_agents > 4:
+            # tighten silently — hallway is fixed-4
+            max_agents = 4
+        if num_agents > 4:
+            raise RuntimeError(
+                f"num_agents={num_agents} > 4 not allowed for spawn_pattern=hallway "
+                f"(policy_v2 MAX_AGENTS=4)"
+            )
+    elif spawn_pattern == "circle":
+        if max_agents != MAX_AGENTS:
+            raise RuntimeError(
+                f"max_agents={max_agents} != contract.MAX_AGENTS={MAX_AGENTS} "
+                f"(circle pattern); the policy buffers are sized for MAX_AGENTS."
+            )
+    else:
         raise RuntimeError(
-            f"max_agents={max_agents} != contract.MAX_AGENTS={MAX_AGENTS}; "
-            "the policy buffers are sized for MAX_AGENTS."
+            f"spawn_pattern={spawn_pattern!r} must be 'circle' or 'hallway'"
         )
+
     if not (1 <= num_agents <= max_agents):
         raise RuntimeError(
             f"num_agents={num_agents} not in [1, {max_agents}]"
@@ -187,7 +246,7 @@ def _build_fleet(context, *args, **kwargs):
     use_sim_time = LaunchConfiguration("use_sim_time")
     pkg_share = FindPackageShare("limo_circle_sim").find("limo_circle_sim")
 
-    poses = _slot_poses(num_agents, total_robots)
+    poses = _slot_poses(num_agents, total_robots, spawn_pattern)
     actions = []
     for i, (x, y, z, yaw) in enumerate(poses):
         ns = f"{ENTITY_PREFIX}{i + 1}"
@@ -242,6 +301,7 @@ def _build_fleet(context, *args, **kwargs):
                     output="screen",
                     parameters=[{
                         "num_agents": num_agents,
+                        "max_agents": max_agents,
                         "use_sim_time": use_sim_time,
                     }],
                     condition=IfCondition(LaunchConfiguration("use_teleop")),
@@ -265,6 +325,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("num_agents", default_value="6"),
         DeclareLaunchArgument("max_agents", default_value=str(MAX_AGENTS)),
+        DeclareLaunchArgument(
+            "spawn_pattern", default_value="circle",
+            description=("which formation to spawn the LIMOs into. "
+                         "'circle' = policy_v1 n-gon (pairs with circle_node, "
+                         "1..10 agents). 'hallway' = policy_v2 square/triangle/"
+                         "line (pairs with hallway_node, 1..4 agents)."),
+        ),
         DeclareLaunchArgument(
             "total_robots", default_value="",
             description=("how many LIMO models to actually spawn (default: num_agents). "

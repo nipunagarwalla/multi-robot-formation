@@ -33,6 +33,7 @@ setup(
     entry_points={
         'console_scripts': [
             'circle_node = limo_circle_sim.circle_node:main',
+            'hallway_node = limo_circle_sim.hallway_node:main',
             'teleop_node = limo_circle_sim.teleop_node:main',
             'markers_node = limo_circle_sim.markers_node:main',
             'gt_tf_node = limo_circle_sim.gt_tf_node:main',
