@@ -11,3 +11,8 @@ dependencies = [
     "scipy>=1.17.1",
     "tqdm>=4.67.3",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

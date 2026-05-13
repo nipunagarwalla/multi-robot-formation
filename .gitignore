@@ -1,2 +1,8 @@
 CLAUDE.md
 .venv
+__pycache__/
+*.pyc
+runs/
+weights/
+.DS_Store
+.claude/settings.local.json
