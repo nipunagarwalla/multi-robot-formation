@@ -2,6 +2,14 @@
 
 <robot name="limo_four_diff" xmlns:xacro="http://ros.org/wiki/xacro">
     <xacro:arg name="robot_namespace" default="/" />
+    <!-- use_real_meshes=true → load the original AgileX .dae visuals
+                              (52 MB body + 11 MB wheel × 4 per robot).
+                              Looks nice on a host with real GPU.
+         use_real_meshes=false → render the body as a yellow box and the
+                                 wheels as black cylinders. ~1 KB per robot,
+                                 survives software OpenGL (UTM on M1 etc.).
+         Collision geometry is the same in both cases. -->
+    <xacro:arg name="use_real_meshes" default="false" />
 
     <xacro:include filename="$(find limo_circle_sim)/urdf/limo_xacro.xacro" />
     <xacro:include filename="$(find limo_circle_sim)/urdf/limo_four_diff.gazebo" />
@@ -29,19 +37,26 @@
     <origin xyz="0.0 0.0 0.15" rpy="0 0 0"/>
   </joint>
     <!-- Base link -->
-    <!-- Visual replaced with a simple box (was: limo_base.dae) so gzclient/rviz
-         don't have to render a 50 MB DAE per robot. UTM/M1 has no GPU acceleration
-         for Linux so software rendering of large meshes OOM-kills the viewer. -->
     <link name="base_link">
-        <visual>
-            <origin xyz="0 0 0" rpy="0 0 0" />
-            <geometry>
-                <box size="${base_x_size} ${base_y_size} ${base_z_size}"/>
-            </geometry>
-            <material name="limo_yellow">
-                <color rgba="1.0 0.85 0.1 1"/>
-            </material>
-        </visual>
+        <xacro:if value="$(arg use_real_meshes)">
+            <visual>
+                <origin xyz="0 0 -0.15" rpy="0 0 1.57" />
+                <geometry>
+                    <mesh filename="file://$(find limo_circle_sim)/meshes/limo_base.dae" scale="1 1 1"/>
+                </geometry>
+            </visual>
+        </xacro:if>
+        <xacro:unless value="$(arg use_real_meshes)">
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0" />
+                <geometry>
+                    <box size="${base_x_size} ${base_y_size} ${base_z_size}"/>
+                </geometry>
+                <material name="limo_yellow">
+                    <color rgba="1.0 0.85 0.1 1"/>
+                </material>
+            </visual>
+        </xacro:unless>
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>

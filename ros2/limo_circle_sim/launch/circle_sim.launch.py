@@ -154,11 +154,16 @@ def _slot_poses(num_agents: int, total_robots: int, spawn_pattern: str = "circle
 
 
 def _spawn_one(pkg_share, namespace: str, x: float, y: float, z: float, yaw: float,
-               use_sim_time):
+               use_sim_time, use_real_meshes):
     urdf_path = PathJoinSubstitution([pkg_share, URDF_REL])
+    # Plumb use_real_meshes through to the URDF. The xacro file has
+    # <xacro:if value="$(arg use_real_meshes)"> blocks around each <visual>
+    # so the choice between .dae meshes and primitive box/cylinder geometry
+    # is made at URDF-load time.
     robot_description_content = Command([
         "xacro", " ", urdf_path,
         " robot_namespace:=", namespace,
+        " use_real_meshes:=", use_real_meshes,
     ])
     return GroupAction([
         PushRosNamespace(namespace),
@@ -244,6 +249,7 @@ def _build_fleet(context, *args, **kwargs):
         )
 
     use_sim_time = LaunchConfiguration("use_sim_time")
+    use_real_meshes = LaunchConfiguration("use_real_meshes")
     pkg_share = FindPackageShare("limo_circle_sim").find("limo_circle_sim")
 
     poses = _slot_poses(num_agents, total_robots, spawn_pattern)
@@ -254,7 +260,9 @@ def _build_fleet(context, *args, **kwargs):
         actions.append(
             TimerAction(
                 period=0.4 * i,
-                actions=[_spawn_one(pkg_share, ns, x, y, z, yaw, use_sim_time)],
+                actions=[_spawn_one(
+                    pkg_share, ns, x, y, z, yaw, use_sim_time, use_real_meshes
+                )],
             )
         )
         # Note: the static world -> <ns>/odom transform that used to live
@@ -358,6 +366,13 @@ def generate_launch_description():
             "use_rviz", default_value="false",
             description=("start rviz2 with config/circle_sim.rviz. "
                          "Cheaper than gzclient on software-GL systems."),
+        ),
+        DeclareLaunchArgument(
+            "use_real_meshes", default_value="false",
+            description=("LIMO visual geometry. false (default) = box+cylinder "
+                         "primitives (~1 KB per robot; required on hosts without "
+                         "hardware GL like M1 UTM). true = real AgileX .dae meshes "
+                         "(~63 MB per robot, photorealistic, needs a real GPU)."),
         ),
 
         IncludeLaunchDescription(
