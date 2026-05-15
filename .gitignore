@@ -6,3 +6,9 @@ runs/
 weights/
 .DS_Store
 .claude/settings.local.json
+
+# limo_circle_sim ROS2 build artifacts
+ros2/**/__pycache__/
+ros2/**/build/
+ros2/**/install/
+ros2/**/log/

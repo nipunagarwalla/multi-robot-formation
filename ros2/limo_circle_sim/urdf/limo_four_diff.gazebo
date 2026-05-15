@@ -1,0 +1,94 @@
+<?xml version="1.0"?>
+
+<robot name="limo_four_diff" xmlns:xacro="http://ros.org/wiki/xacro">
+    <xacro:include filename="$(find limo_circle_sim)/urdf/limo_gazebo.gazebo" />
+
+    <!-- Actuator configurations -->
+    <xacro:limo_wheel_transmission wheel_prefix="front_right" />
+    <xacro:limo_wheel_transmission wheel_prefix="front_left" />
+    <xacro:limo_wheel_transmission wheel_prefix="rear_left" />
+    <xacro:limo_wheel_transmission wheel_prefix="rear_right" />
+    <!-- Controller configurations -->
+    <xacro:gazebo_laser frame_prefix="laser" />
+    <!-- depth camera disabled for fleet sim — 10 cams * 640x480 * 10 Hz saturates the bus -->
+    <!-- <xacro:gazebo_depth_camera frame_prefix="depth_camera" /> -->
+    <!-- <xacro:gazebo_imu frame_prefix="imu" /> -->
+    
+    <gazebo reference="front_left_wheel">
+        <mu1>10</mu1>
+        <mu2>10</mu2>
+        <kp>10000000.0</kp>
+        <kd>1.0</kd>
+        <minDepth>0.01</minDepth>
+        <fdir1>1 0 0</fdir1>
+        <maxContacts value="64"/>
+    </gazebo>
+    <gazebo reference="front_right_wheel">
+        <mu1>10</mu1>
+        <mu2>10</mu2>
+        <kp>10000000.0</kp>
+        <kd>1.0</kd>
+        <minDepth>0.01</minDepth>
+        <fdir1>1 0 0</fdir1>
+        <maxContacts value="64"/>
+    </gazebo>
+    <gazebo reference="rear_left_wheel">
+        <mu1>10</mu1>
+        <mu2>10</mu2>
+        <kp>10000000.0</kp>
+        <kd>1.0</kd>
+        <minDepth>0.01</minDepth>
+        <fdir1>1 0 0</fdir1>
+        <maxContacts value="64"/>
+    </gazebo>
+    <gazebo reference="rear_right_wheel">
+        <mu1>10</mu1>
+        <mu2>10</mu2>
+        <kp>10000000.0</kp>
+        <kd>1.0</kd>
+        <minDepth>0.01</minDepth>
+        <fdir1>1 0 0</fdir1>
+        <maxContacts value="64"/>
+    </gazebo>
+
+  <gazebo>
+    <!-- Planar-move plugin: treats the LIMO as an OMNIDIRECTIONAL planar
+         body. Twist input is interpreted in body frame; the plugin
+         rotates it to world frame internally and applies it via
+         SetLinearVel / SetAngularVel.
+
+         circle_node and teleop_node both emit world-frame velocities;
+         they rotate world → body using the robot's current yaw before
+         publishing here. The two rotations cancel, so a command of
+         (vx_world, vy_world) actually moves the body in (+vx, +vy) world
+         coords regardless of the robot's heading. That's what the user
+         meant by "everything moves the robots in global frame".
+
+         Yaw stays at the spawn value (π/2) because angular.z is held at
+         0 in our control nodes — robots translate but don't rotate, the
+         omnidirectional assumption requested by the user.
+
+         publish_odom_tf=false: gt_tf_node owns the world → base_footprint
+         TF from /model_states. /odom topic still published for any
+         downstream consumer that wants the plugin's velocity integral. -->
+    <plugin name='planar_move_$(arg robot_namespace)' filename='libgazebo_ros_planar_move.so'>
+          <ros>
+            <namespace>$(arg robot_namespace)</namespace>
+            <remapping>cmd_vel:=cmd_vel</remapping>
+            <remapping>odom:=odom</remapping>
+          </ros>
+
+          <update_rate>30</update_rate>
+          <publish_rate>20</publish_rate>
+          <publish_odom>true</publish_odom>
+          <publish_odom_tf>false</publish_odom_tf>
+          <odometry_frame>$(arg robot_namespace)/odom</odometry_frame>
+          <robot_base_frame>$(arg robot_namespace)/base_footprint</robot_base_frame>
+
+          <covariance_x>0.0001</covariance_x>
+          <covariance_y>0.0001</covariance_y>
+          <covariance_yaw>0.01</covariance_yaw>
+      </plugin>
+    </gazebo>
+
+</robot>

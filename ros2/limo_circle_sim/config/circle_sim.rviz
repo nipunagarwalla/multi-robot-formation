@@ -1,0 +1,213 @@
+# rviz2 config for limo_circle_sim.
+#
+# Fixed frame = world. Per-robot RobotModel displays backed by the
+# namespaced /limo_<i>/robot_description topics, with TF Prefix matching
+# the namespace.
+#
+# TF tree assumed (published to GLOBAL /tf):
+#   world -> limo_<i>/odom            (static_transform_publisher in launch)
+#   limo_<i>/odom -> limo_<i>/base_footprint  (gazebo_ros_diff_drive plugin)
+#   limo_<i>/base_footprint -> limo_<i>/<link>... (robot_state_publisher with frame_prefix=limo_<i>/)
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Global Options:
+    Background Color: 28; 28; 32
+    Default Light: true
+    Fixed Frame: world
+    Frame Rate: 30
+  Displays:
+    - Alpha: 0.5
+      Class: rviz_default_plugins/Grid
+      Color: 100; 100; 100
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 8
+      Plane: XY
+      Name: Grid
+    - Class: rviz_default_plugins/TF
+      Enabled: false
+      Name: TF
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Arena
+      Enabled: true
+      Namespaces:
+        spawn_line: true
+        goal_line: true
+        wall_north: true
+        wall_south: true
+        wall_east: true
+        wall_west: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /arena_markers
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_1/robot_description
+      Enabled: true
+      Name: limo_1
+      TF Prefix: limo_1
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_2/robot_description
+      Enabled: true
+      Name: limo_2
+      TF Prefix: limo_2
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_3/robot_description
+      Enabled: true
+      Name: limo_3
+      TF Prefix: limo_3
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_4/robot_description
+      Enabled: true
+      Name: limo_4
+      TF Prefix: limo_4
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_5/robot_description
+      Enabled: true
+      Name: limo_5
+      TF Prefix: limo_5
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_6/robot_description
+      Enabled: true
+      Name: limo_6
+      TF Prefix: limo_6
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_7/robot_description
+      Enabled: true
+      Name: limo_7
+      TF Prefix: limo_7
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_8/robot_description
+      Enabled: true
+      Name: limo_8
+      TF Prefix: limo_8
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_9/robot_description
+      Enabled: true
+      Name: limo_9
+      TF Prefix: limo_9
+      Update Interval: 0
+      Visual Enabled: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /limo_10/robot_description
+      Enabled: true
+      Name: limo_10
+      TF Prefix: limo_10
+      Update Interval: 0
+      Visual Enabled: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Name: Current View
+      Pitch: 1.05
+      Yaw: 4.71239
+Window Geometry:
+  Height: 720
+  Width: 960

@@ -1,0 +1,425 @@
+"""
+circle_sim.launch.py — single entry point for the circle_policy_v1 + LIMO
+fleet Gazebo simulation.
+
+Spawns `max_agents` LIMOs (default 10). The first `num_agents` are placed on
+the target_formation_positions circle around (0, SPAWN_Y); the rest are
+parked at the sentinel position (SENTINEL_X, SENTINEL_Y) ≈ (24, 24) m off
+the visible arena, ready for the teleop node to flip into the formation
+via the `+` key.
+
+Then starts circle_node (policy) and optionally teleop_node.
+
+Args:
+  weights      (required)   absolute path to a .pt checkpoint
+  num_agents   (default 6)  initial present count, 1..max_agents
+  max_agents   (default 10) MUST equal code/contract.py:MAX_AGENTS
+  world        (default circle_arena.world)
+  use_teleop   (default true)
+  use_sim_time (default true)
+
+Usage:
+  ros2 launch limo_circle_sim circle_sim.launch.py \\
+      weights:=/abs/path/to/latest.pt \\
+      num_agents:=6
+"""
+from __future__ import annotations
+
+import os
+import math
+import pathlib
+import sys
+
+import launch_ros.descriptions
+from launch import LaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    GroupAction,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+    TimerAction,
+)
+from launch.conditions import IfCondition, UnlessCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node, PushRosNamespace
+from launch_ros.substitutions import FindPackageShare
+
+
+# Import contract constants and the formation slot function from code/.
+# The launch file lives at multi-robot-formation/ros2/limo_circle_sim/launch/
+# so three parents up is the repo root.
+_HERE = pathlib.Path(__file__).resolve()
+_REPO = _HERE.parents[3]
+_CODE = _REPO / "code"
+if not _CODE.is_dir():
+    raise RuntimeError(f"could not find policy code at {_CODE}")
+sys.path.insert(0, str(_CODE))
+
+from contract import MAX_AGENTS, SPAWN_Y, SENTINEL_X, SENTINEL_Y  # noqa: E402
+from env_hallway import target_formation_positions  # noqa: E402
+
+
+URDF_REL = "urdf/limo_four_diff.xacro"
+ENTITY_PREFIX = "limo_"
+# Shift the spawn hexagon's Y center up from contract.SPAWN_Y (-3.5) so the
+# bottom point (limo_4 at y_center - 0.6) lands inside the ±4 m wall
+# envelope. -3.2 puts limo_4 at y=-3.8, ~0.15 m clear of the south wall.
+# The policy reads obs.pos at runtime — it doesn't care that the actual
+# spawn is 0.3 m up from training; that's well within its training
+# distribution.
+SPAWN_Y_LAUNCH = -3.2
+# LIMO is diff-drive (body-+X = forward). The policy was trained holonomic
+# with +Y = goal direction. Spawning yawed +pi/2 makes body-+X align with
+# world-+Y, so the policy's "drive forward" command actually moves toward
+# the goal (otherwise gazebo_ros_diff_drive ignores linear.y and the
+# robots crab sideways or freeze).
+DEFAULT_YAW = math.pi / 2
+# Side length of the hallway-style (square / triangle / line) formation.
+# Mirrors policy_v2's contract.FORMATION_SCALE; used only when
+# spawn_pattern=hallway.
+HALLWAY_FORMATION_SCALE = 0.35
+
+
+def _hallway_formation(n: int, scale: float = HALLWAY_FORMATION_SCALE):
+    """Inline copy of upstream/aneesh/policy_v2:env_hallway.target_formation_positions.
+    Returns a list of (x, y) tuples centered at origin.
+
+      n=4 → square        (vertices at ±s/2)
+      n=3 → triangle      (one vertex pointing +y)
+      n=2 → horizontal line, separation s
+      n=1 → solo at origin
+    """
+    s = scale
+    if n == 4:
+        return [(-s / 2, -s / 2), (s / 2, -s / 2), (s / 2, s / 2), (-s / 2, s / 2)]
+    if n == 3:
+        h = s / (2 * 3 ** 0.5)
+        H = s / (3 ** 0.5)
+        return [(-s / 2, -h), (s / 2, -h), (0.0, H)]
+    if n == 2:
+        return [(-s / 2, 0.0), (s / 2, 0.0)]
+    if n == 1:
+        return [(0.0, 0.0)]
+    raise ValueError(f"unsupported active_count={n} for hallway spawn_pattern")
+
+
+def _safe_str(v: float) -> str:
+    """Round to 4dp and snap near-zero values to +0.0.
+
+    spawn_entity.py uses argparse with single-dash long options. A value
+    like -2.6e-08 (which target_formation_positions(6) produces for the
+    top-of-circle X due to float precision) confuses argparse — it
+    interprets the leading '-' as a new flag.
+    """
+    if abs(v) < 1e-4:
+        v = 0.0
+    return f"{v:.4f}"
+
+
+def _slot_poses(num_agents: int, total_robots: int, spawn_pattern: str = "circle"):
+    """Return list[(x, y, z, yaw)] of length total_robots.
+
+    The first `num_agents` slots sit on the chosen formation, shifted to
+    (0, SPAWN_Y_LAUNCH). The rest park at the sentinel (only present when
+    total_robots > num_agents — opt-in via launch arg
+    `total_robots:=10` for full spawn/delete teleop coverage).
+
+    spawn_pattern:
+      "circle"  → v1's n-gon on a 0.6 m radius circle (default; pairs
+                  with circle_node + policy_v1)
+      "hallway" → v2's square/triangle/line (pairs with hallway_node +
+                  policy_v2). n must be in {1..4}.
+    """
+    if spawn_pattern == "hallway":
+        base = _hallway_formation(num_agents)
+    else:  # "circle" (default) — v1's n-gon
+        # target_formation_positions returns a torch tensor; convert to
+        # a list of (x, y) tuples for uniform handling with _hallway_formation.
+        t = target_formation_positions(num_agents).cpu().numpy()
+        base = [(float(t[i, 0]), float(t[i, 1])) for i in range(num_agents)]
+
+    out: list[tuple[float, float, float, float]] = []
+    for i in range(total_robots):
+        if i < num_agents:
+            x, y_offset = base[i]
+            # Note: SPAWN_Y_LAUNCH, not contract.SPAWN_Y, so the formation
+            # fits inside the ±4 m wall envelope. See module-level comment.
+            y = float(SPAWN_Y_LAUNCH + y_offset)
+        else:
+            x = float(SENTINEL_X)
+            y = float(SENTINEL_Y)
+        out.append((float(x), y, 0.0, DEFAULT_YAW))
+    return out
+
+
+def _spawn_one(pkg_share, namespace: str, x: float, y: float, z: float, yaw: float,
+               use_sim_time, use_real_meshes):
+    urdf_path = PathJoinSubstitution([pkg_share, URDF_REL])
+    # Plumb use_real_meshes through to the URDF. The xacro file has
+    # <xacro:if value="$(arg use_real_meshes)"> blocks around each <visual>
+    # so the choice between .dae meshes and primitive box/cylinder geometry
+    # is made at URDF-load time.
+    robot_description_content = Command([
+        "xacro", " ", urdf_path,
+        " robot_namespace:=", namespace,
+        " use_real_meshes:=", use_real_meshes,
+    ])
+    return GroupAction([
+        PushRosNamespace(namespace),
+        Node(
+            package="robot_state_publisher",
+            executable="robot_state_publisher",
+            parameters=[{
+                "robot_description": launch_ros.descriptions.ParameterValue(
+                    robot_description_content,
+                    value_type=str,
+                ),
+                "use_sim_time": use_sim_time,
+                # Prepend <ns>/ to every URDF frame name so multi-robot TF
+                # doesn't collide on the global /tf topic.
+                "frame_prefix": f"{namespace}/",
+            }],
+            # NOTE: do NOT remap /tf or /tf_static — keeping them global is
+            # what lets rviz2 (running in the root namespace) see all robots
+            # in a single TF tree under the 'world' fixed frame.
+        ),
+        Node(
+            package="joint_state_publisher",
+            executable="joint_state_publisher",
+            parameters=[{"use_sim_time": use_sim_time}],
+        ),
+        Node(
+            package="gazebo_ros",
+            executable="spawn_entity.py",
+            arguments=[
+                "-entity", namespace,
+                "-topic", "robot_description",
+                "-x", _safe_str(x),
+                "-y", _safe_str(y),
+                "-z", _safe_str(z),
+                "-Y", _safe_str(yaw),
+                "-robot_namespace", namespace,
+            ],
+            output="screen",
+        ),
+    ])
+
+
+def _build_fleet(context, *args, **kwargs):
+    """Resolve runtime args and emit the per-robot spawn actions."""
+    num_agents = int(LaunchConfiguration("num_agents").perform(context))
+    max_agents = int(LaunchConfiguration("max_agents").perform(context))
+    total_robots_str = LaunchConfiguration("total_robots").perform(context)
+    spawn_pattern = LaunchConfiguration("spawn_pattern").perform(context) or "circle"
+    # default total_robots = num_agents (no sentinel spawns; lighter on RAM)
+    total_robots = int(total_robots_str) if total_robots_str else num_agents
+
+    # For circle pattern we sanity-check against policy_v1's contract.MAX_AGENTS=10.
+    # For hallway pattern, policy_v2 caps at MAX_AGENTS=4 regardless of the
+    # max_agents launch arg, so we cap effective max at 4 in that branch.
+    if spawn_pattern == "hallway":
+        if max_agents > 4:
+            # tighten silently — hallway is fixed-4
+            max_agents = 4
+        if num_agents > 4:
+            raise RuntimeError(
+                f"num_agents={num_agents} > 4 not allowed for spawn_pattern=hallway "
+                f"(policy_v2 MAX_AGENTS=4)"
+            )
+    elif spawn_pattern == "circle":
+        if max_agents != MAX_AGENTS:
+            raise RuntimeError(
+                f"max_agents={max_agents} != contract.MAX_AGENTS={MAX_AGENTS} "
+                f"(circle pattern); the policy buffers are sized for MAX_AGENTS."
+            )
+    else:
+        raise RuntimeError(
+            f"spawn_pattern={spawn_pattern!r} must be 'circle' or 'hallway'"
+        )
+
+    if not (1 <= num_agents <= max_agents):
+        raise RuntimeError(
+            f"num_agents={num_agents} not in [1, {max_agents}]"
+        )
+    if not (num_agents <= total_robots <= max_agents):
+        raise RuntimeError(
+            f"total_robots={total_robots} must be in [num_agents={num_agents}, "
+            f"max_agents={max_agents}]"
+        )
+
+    use_sim_time = LaunchConfiguration("use_sim_time")
+    use_real_meshes = LaunchConfiguration("use_real_meshes")
+    pkg_share = FindPackageShare("limo_circle_sim").find("limo_circle_sim")
+
+    poses = _slot_poses(num_agents, total_robots, spawn_pattern)
+    actions = []
+    for i, (x, y, z, yaw) in enumerate(poses):
+        ns = f"{ENTITY_PREFIX}{i + 1}"
+        # stagger spawns to avoid spawn_entity racing on robot_description
+        actions.append(
+            TimerAction(
+                period=0.4 * i,
+                actions=[_spawn_one(
+                    pkg_share, ns, x, y, z, yaw, use_sim_time, use_real_meshes
+                )],
+            )
+        )
+        # Note: the static world -> <ns>/odom transform that used to live
+        # here was removed. The diff_drive plugin's encoder-derived
+        # <ns>/odom -> <ns>/base_footprint diverges from physics when
+        # wheels slip against walls, so rviz showed robots phasing through
+        # the arena. gt_tf_node now publishes world -> <ns>/base_footprint
+        # directly from /model_states (ground truth) and the URDF disables
+        # the plugin's publish_odom_tf. See gt_tf_node.py for the rationale.
+
+    # circle_node — opt-in via use_policy:=true. Default false so you can
+    # `ros2 run limo_circle_sim circle_node` manually for debugging.
+    actions.append(
+        TimerAction(
+            period=0.4 * max_agents + 2.0,
+            actions=[
+                Node(
+                    package="limo_circle_sim",
+                    executable="circle_node",
+                    output="screen",
+                    parameters=[{
+                        "weights": LaunchConfiguration("weights"),
+                        "num_agents": num_agents,
+                        "max_agents": max_agents,
+                        "total_robots": total_robots,
+                        "entity_prefix": ENTITY_PREFIX,
+                        "spawn_y": SPAWN_Y_LAUNCH,
+                        "spawn_yaw": DEFAULT_YAW,
+                        "use_sim_time": use_sim_time,
+                    }],
+                    condition=IfCondition(LaunchConfiguration("use_policy")),
+                ),
+            ],
+        )
+    )
+
+    actions.append(
+        TimerAction(
+            period=0.4 * max_agents + 2.0,
+            actions=[
+                Node(
+                    package="limo_circle_sim",
+                    executable="teleop_node",
+                    output="screen",
+                    parameters=[{
+                        "num_agents": num_agents,
+                        "max_agents": max_agents,
+                        "use_sim_time": use_sim_time,
+                    }],
+                    condition=IfCondition(LaunchConfiguration("use_teleop")),
+                ),
+            ],
+        )
+    )
+
+    return actions
+
+
+def generate_launch_description():
+    pkg_share = FindPackageShare("limo_circle_sim")
+    default_world = PathJoinSubstitution([pkg_share, "worlds", "circle_arena.world"])
+    pkg_gazebo_ros = FindPackageShare("gazebo_ros")
+
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            "weights", default_value="",
+            description="path to .pt checkpoint (only required when use_policy:=true)",
+        ),
+        DeclareLaunchArgument("num_agents", default_value="6"),
+        DeclareLaunchArgument("max_agents", default_value=str(MAX_AGENTS)),
+        DeclareLaunchArgument(
+            "spawn_pattern", default_value="circle",
+            description=("which formation to spawn the LIMOs into. "
+                         "'circle' = policy_v1 n-gon (pairs with circle_node, "
+                         "1..10 agents). 'hallway' = policy_v2 square/triangle/"
+                         "line (pairs with hallway_node, 1..4 agents)."),
+        ),
+        DeclareLaunchArgument(
+            "total_robots", default_value="",
+            description=("how many LIMO models to actually spawn (default: num_agents). "
+                         "Set to max_agents (10) to also spawn sentinel-parked spares "
+                         "for spawn/delete teleop. Each extra robot costs RAM."),
+        ),
+        DeclareLaunchArgument("world", default_value=default_world),
+        DeclareLaunchArgument(
+            "use_policy", default_value="false",
+            description="start circle_node from the launch (default off — run it manually with `ros2 run`)",
+        ),
+        DeclareLaunchArgument(
+            "use_teleop", default_value="false",
+            description="start teleop_node from the launch (default off — run it manually with `ros2 run`)",
+        ),
+        DeclareLaunchArgument("use_sim_time", default_value="true"),
+        DeclareLaunchArgument(
+            "headless", default_value="false",
+            description=("skip gzclient (the GUI). gzserver still runs. "
+                         "Set true on RAM-constrained machines (e.g. M1 UTM VMs) "
+                         "where gzclient gets OOM-killed."),
+        ),
+        DeclareLaunchArgument(
+            "use_rviz", default_value="false",
+            description=("start rviz2 with config/circle_sim.rviz. "
+                         "Cheaper than gzclient on software-GL systems."),
+        ),
+        DeclareLaunchArgument(
+            "use_real_meshes", default_value="false",
+            description=("LIMO visual geometry. false (default) = box+cylinder "
+                         "primitives (~1 KB per robot; required on hosts without "
+                         "hardware GL like M1 UTM). true = real AgileX .dae meshes "
+                         "(~63 MB per robot, photorealistic, needs a real GPU)."),
+        ),
+
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([pkg_gazebo_ros, "launch", "gzserver.launch.py"])
+            ),
+            launch_arguments={"world": LaunchConfiguration("world")}.items(),
+        ),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([pkg_gazebo_ros, "launch", "gzclient.launch.py"])
+            ),
+            condition=UnlessCondition(LaunchConfiguration("headless")),
+        ),
+
+        Node(
+            package="rviz2",
+            executable="rviz2",
+            arguments=[
+                "-d",
+                PathJoinSubstitution([pkg_share, "config", "circle_sim.rviz"]),
+            ],
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("use_rviz")),
+        ),
+
+        # Static arena geometry (spawn/goal lines + 4 walls) as Markers so
+        # rviz can render them. Cheap and unconditional — Gazebo physics
+        # gets the walls from the .world file, rviz gets them from here.
+        Node(
+            package="limo_circle_sim",
+            executable="markers_node",
+            output="screen",
+            parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+        ),
+
+        # Ground-truth TF broadcaster — publishes world → <ns>/base_footprint
+        # for every LIMO from /model_states. Required for correct rviz
+        # rendering because the diff_drive plugin's encoder odometry drifts
+        # when wheels slip (against walls or each other) and rviz used to
+        # show robots far from their physics position. Lightweight.
+        Node(
+            package="limo_circle_sim",
+            executable="gt_tf_node",
+            output="screen",
+            parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+        ),
+
+        OpaqueFunction(function=_build_fleet),
+    ])

@@ -1,0 +1,144 @@
+<?xml version="1.0" ?>
+<!--
+  circle_arena.world
+
+  8m x 8m arena (X, Y in [-4, +4]) that mirrors the pygame FormationHallwayEnv
+  used to train circle_policy_v1 (see code/contract.py: WORLD_W=WORLD_H=8.0,
+  SPAWN_Y=-3.5, GOAL_Y=+3.5).
+
+  Four 0.4 m tall physical perimeter walls bound the arena. Pygame env_hallway
+  soft-clips positions at the same boundary; the walls keep diff-drive LIMOs
+  from drifting out when the policy commands carry them past the edge.
+
+  Blue strip = spawn line, green strip = goal line.
+  The gazebo_ros_state plugin publishes /model_states (all robot poses) and
+  exposes /set_entity_state for teleporting models.
+-->
+<sdf version="1.6">
+  <world name="circle_arena">
+
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <!-- 10 physics substeps per 20 Hz policy tick — matches pygame dt=0.05s -->
+    <physics type="ode">
+      <max_step_size>0.005</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>200</real_time_update_rate>
+    </physics>
+
+    <!-- Spawn line: blue strip at y = -3.5, spanning x in [-4, 4] -->
+    <model name="spawn_line">
+      <static>true</static>
+      <pose>0 -3.5 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><box><size>8.0 0.05 0.002</size></box></geometry>
+          <material>
+            <ambient>0.1 0.2 0.9 1</ambient>
+            <diffuse>0.1 0.2 0.9 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Goal line: green strip at y = +3.5 -->
+    <model name="goal_line">
+      <static>true</static>
+      <pose>0 3.5 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><box><size>8.0 0.05 0.002</size></box></geometry>
+          <material>
+            <ambient>0.1 0.8 0.2 1</ambient>
+            <diffuse>0.1 0.8 0.2 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Perimeter walls: 0.1 m thick, 1.0 m tall, centered at ±4.05 m on
+         each axis. Wall material sits OUTSIDE the trained 8x8 m playable
+         boundary so the floor is exactly 8x8 m and robots that drift to
+         the edge meet a wall instead of empty ground.
+
+         Wall HEIGHT bumped 0.4 → 1.0 m because collisions between LIMOs
+         under a noisy policy can launch one of them vertically, and the
+         old 0.4 m walls let them clear and roll onto Gazebo's infinite
+         ground_plane beyond the arena.
+
+         To keep all spawn poses inside this envelope, the launch shifts
+         the hexagon center to (0, SPAWN_Y_LAUNCH=-3.2) instead of
+         contract.SPAWN_Y=-3.5; otherwise limo_4 at y=-4.1 would sit
+         inside the south wall. -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 4.05 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>8.2 0.1 1.0</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>8.2 0.1 1.0</size></box></geometry>
+          <material>
+            <ambient>0.6 0.6 0.6 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -4.05 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>8.2 0.1 1.0</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>8.2 0.1 1.0</size></box></geometry>
+          <material>
+            <ambient>0.6 0.6 0.6 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_east">
+      <static>true</static>
+      <pose>4.05 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.1 8.0 1.0</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.1 8.0 1.0</size></box></geometry>
+          <material>
+            <ambient>0.6 0.6 0.6 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-4.05 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.1 8.0 1.0</size></box></geometry></collision>
+        <visual name="vis">
+          <geometry><box><size>0.1 8.0 1.0</size></box></geometry>
+          <material>
+            <ambient>0.6 0.6 0.6 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- gazebo_ros_state: publishes /model_states (all robot poses+twists)
+         and exposes /set_entity_state service for teleporting models. -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros>
+        <namespace>/</namespace>
+      </ros>
+      <update_rate>50.0</update_rate>
+    </plugin>
+
+  </world>
+</sdf>
